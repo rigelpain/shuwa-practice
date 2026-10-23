@@ -78,6 +78,8 @@ export interface Word {
   /** The clip practice attempts are compared against. */
   referenceId: string | null;
   createdAt: number;
+  /** Group in the word list; words added by hand have none. */
+  category?: string;
 }
 
 /** Older clips have no kind: the word's reference counts as a sample, anything else as practice. */

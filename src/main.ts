@@ -6,6 +6,7 @@ import { ClipRecorder, trimToHands } from './recorder';
 import { compareClips, type CompareResult, type Hint } from './scoring';
 import * as db from './storage';
 import { Tracker, type LoadEvent, type LoadStep } from './tracker';
+import { STARTER_VOCABULARY } from './vocabulary';
 import { clipKind, type Clip, type ClipKind, type Frame, type FrameData, type Word } from './types';
 
 type Kind = ClipKind;
@@ -73,6 +74,10 @@ const ui = {
   addWord: $<HTMLFormElement>('addWord'),
   wordInput: $<HTMLInputElement>('wordInput'),
   wordList: $('wordList'),
+  wordLegend: $('wordLegend'),
+  starter: $('starter'),
+  addStarter: $<HTMLButtonElement>('addStarter'),
+  setAutoNext: $<HTMLInputElement>('setAutoNext'),
   wordDetail: $('wordDetail'),
   exportData: $<HTMLButtonElement>('exportData'),
   importData: $<HTMLButtonElement>('importData'),
@@ -134,6 +139,8 @@ interface Settings {
   showVideo: boolean;
   showBones: boolean;
   mode: Mode;
+  /** After a word's first sample, move on to the next word that has none. */
+  autoNext: boolean;
 }
 
 const settings: Settings = (() => {
@@ -148,6 +155,7 @@ const settings: Settings = (() => {
     showVideo: true,
     showBones: true,
     mode: 'record',
+    autoNext: true,
   };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') };
@@ -526,6 +534,12 @@ async function saveClip(frames: Frame[], video: Blob | null, kind: Kind): Promis
   if (kind === 'sample') {
     hideResult();
     const count = clips.filter((c) => clipKind(c, word) === 'sample').length;
+    const next = becomesReference && settings.autoNext ? nextWordWithoutSamples(word.id) : null;
+    if (next) {
+      await selectWord(next.id, true);
+      say(`「${word.label}」の見本を保存しました。次は「${next.label}」です。`);
+      return;
+    }
     say(
       becomesReference
         ? `「${word.label}」の見本を保存しました。これがお手本になります。見本をもう何回か撮ると、読み取りが安定します。`
@@ -666,8 +680,9 @@ async function addWord(label: string): Promise<void> {
   await selectWord(word.id);
 }
 
-async function selectWord(id: string): Promise<void> {
-  if (phase !== 'idle') return;
+/** `whileSaving` lets the app itself move on to the next word as a recording is saved. */
+async function selectWord(id: string, whileSaving = false): Promise<void> {
+  if (phase !== 'idle' && !(whileSaving && phase === 'saving')) return;
   selectedId = id;
   await loadClips();
   hideResult();
@@ -766,25 +781,83 @@ async function showVideo(clip: Clip | null): Promise<void> {
   }
 }
 
+const OWN_WORDS = '自分で追加した単語';
+
+/** Words grouped as the list shows them: your own first, then the starter categories in order. */
+function groupedWords(): Array<[string, Word[]]> {
+  const order = [OWN_WORDS, ...STARTER_VOCABULARY.map((g) => g.category)];
+  const groups = new Map<string, Word[]>();
+  for (const w of words) {
+    const key = w.category ?? OWN_WORDS;
+    groups.set(key, [...(groups.get(key) ?? []), w]);
+  }
+  return [...groups].sort(([a], [b]) => (order.indexOf(a) + 1 || order.length + 1) - (order.indexOf(b) + 1 || order.length + 1));
+}
+
+const hasSamples = (word: Word) => templates.some((t) => t.word.id === word.id);
+
 function renderWords(): void {
+  const missingStarter = STARTER_VOCABULARY.some((g) => g.words.some((label) => !words.some((w) => w.label === label)));
+  ui.starter.hidden = !missingStarter;
+  ui.wordLegend.hidden = !words.some((w) => !hasSamples(w));
   if (!words.length) {
     ui.wordList.replaceChildren(
-      el('li', { className: 'empty', textContent: 'まだ単語がありません。上の欄に入力して追加してください。' }),
+      el('p', { className: 'empty', textContent: 'まだ単語がありません。上の欄に入力するか、基本の単語を追加してください。' }),
     );
     return;
   }
+  const groups = groupedWords();
   ui.wordList.replaceChildren(
-    ...words.map((w) => {
-      const button = el(
-        'button',
-        { type: 'button', className: 'word', onclick: () => void selectWord(w.id) },
-        w.label,
-        w.referenceId ? null : el('small', { textContent: 'お手本なし' }),
-      );
-      button.setAttribute('aria-pressed', String(w.id === selectedId));
-      return el('li', {}, button);
-    }),
+    ...groups.map(([name, list]) =>
+      el(
+        'section',
+        { className: 'word-group' },
+        groups.length > 1 ? el('h3', { textContent: name }) : null,
+        el(
+          'ul',
+          { className: 'word-chips' },
+          ...list.map((w) => {
+            const button = el(
+              'button',
+              {
+                type: 'button',
+                className: hasSamples(w) ? 'word' : 'word is-empty',
+                title: hasSamples(w) ? '' : 'まだ見本がありません',
+                onclick: () => void selectWord(w.id),
+              },
+              w.label,
+            );
+            button.setAttribute('aria-pressed', String(w.id === selectedId));
+            return el('li', {}, button);
+          }),
+        ),
+      ),
+    ),
   );
+}
+
+async function addStarterVocabulary(): Promise<void> {
+  const have = new Set(words.map((w) => w.label));
+  const now = Date.now();
+  const added: Word[] = STARTER_VOCABULARY.flatMap((g) =>
+    g.words.filter((label) => !have.has(label)).map((label) => ({ label, category: g.category })),
+  ).map((w, i) => ({ id: crypto.randomUUID(), referenceId: null, createdAt: now + i, ...w }));
+  if (!added.length) return;
+  await db.putWords(added);
+  words = await db.listWords();
+  await loadTemplates();
+  const first = selectedId ? null : added[0].id;
+  if (first) await selectWord(first);
+  else renderWords();
+  say(`基本の単語と言い回しを${added.length}個追加しました。見本はまだ入っていないので、手話者が順に撮ると読み取れるようになります。`);
+}
+
+/** The next word in list order, after the given one, that has no sample yet. */
+function nextWordWithoutSamples(after: string): Word | null {
+  const ordered = groupedWords().flatMap(([, list]) => list);
+  const at = ordered.findIndex((w) => w.id === after);
+  const rest = [...ordered.slice(at + 1), ...ordered.slice(0, Math.max(at, 0))];
+  return rest.find((w) => !hasSamples(w)) ?? null;
 }
 
 function renderDetail(): void {
@@ -806,7 +879,7 @@ function renderDetail(): void {
     parts.push(
       el('p', {
         className: 'empty-state',
-        textContent: 'まだお手本がありません。カメラの前で手話をして「お手本を撮る」を押すか、手話の動画ファイルを読み込んでください。',
+        textContent: 'まだ見本がありません。カメラの前で手話をして「見本を撮る」を押すか、手話の動画ファイルを読み込んでください。最初の見本がお手本になります。',
       }),
     );
   }
@@ -902,7 +975,7 @@ function updateControls(): void {
       : !stream
         ? '「カメラを使う」を押すと撮影できます。手話の動画ファイルからも読み込めます。'
         : !ref
-          ? `まず「${word.label}」の見本を撮ってください。最初の見本がお手本になります。`
+          ? `まず「${word.label}」の見本を撮ってください（スペースキーでも撮れます）。最初の見本がお手本になります。`
           : '手を下ろした状態から始めて、終わったら手を下ろしてください。スペースキーでも練習を始められます。';
 }
 
@@ -932,6 +1005,7 @@ async function loadTemplates(): Promise<void> {
     const word = byId.get(clip.wordId);
     return word && clipKind(clip, word) === 'sample' ? [{ word, clip }] : [];
   });
+  renderWords();
   updateControls();
 }
 
@@ -1234,6 +1308,11 @@ function bindSettings(): void {
   ui.setUseFace.checked = settings.useFace;
   ui.setMirrorCompare.checked = settings.mirrorCompare;
   ui.setMirrorView.checked = settings.mirrorView;
+  ui.setAutoNext.checked = settings.autoNext;
+  ui.setAutoNext.onchange = () => {
+    settings.autoNext = ui.setAutoNext.checked;
+    saveSettings();
+  };
 
   const rescore = () => {
     comparisons.clear();
@@ -1317,6 +1396,7 @@ function bindEvents(): void {
   ui.clearTranscript.onclick = clearTranscript;
   ui.copyTranscript.onclick = () => void copyTranscript();
 
+  ui.addStarter.onclick = () => void addStarterVocabulary();
   ui.addWord.onsubmit = (e) => {
     e.preventDefault();
     const label = ui.wordInput.value.trim();
@@ -1357,7 +1437,7 @@ function bindEvents(): void {
     if (e.code !== 'Space' || (e.target as HTMLElement).closest('input, select, textarea, button, summary, video')) return;
     if (settings.mode === 'read') return;
     e.preventDefault();
-    if (phase === 'idle') void record('practice');
+    if (phase === 'idle') void record(referenceClip() ? 'practice' : 'sample');
     else stop(true);
   });
 }

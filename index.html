@@ -103,6 +103,7 @@
             <label class="check"><input type="checkbox" id="setUseFace" /> 表情と頭の動きも点数に入れる</label>
             <label class="check"><input type="checkbox" id="setMirrorCompare" /> 利き手が逆の人として比べる</label>
             <label class="check"><input type="checkbox" id="setMirrorView" /> 鏡のように左右反転して表示</label>
+            <label class="check"><input type="checkbox" id="setAutoNext" /> 見本を撮ったら、見本のない次の単語へ進む</label>
           </div>
         </details>
       </section>
@@ -113,7 +114,12 @@
           <input type="text" id="wordInput" placeholder="単語を追加（例：ありがとう）" autocomplete="off" required />
           <button type="submit">追加</button>
         </form>
-        <ul class="word-list" id="wordList"></ul>
+        <div class="starter" id="starter">
+          <button type="button" class="quiet" id="addStarter">基本の単語と言い回しを追加</button>
+          <span class="starter-note">見本は入っていません。手話者が撮ると読み取れるようになります。</span>
+        </div>
+        <p class="word-legend" id="wordLegend" hidden>点線の単語は、まだ見本がありません。</p>
+        <div class="word-list" id="wordList"></div>
         <div class="word-detail" id="wordDetail"></div>
         <div class="data-io">
           <p class="data-io-note">

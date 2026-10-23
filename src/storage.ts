@@ -59,6 +59,12 @@ export async function putWord(word: Word): Promise<void> {
   await request((await store('words', 'readwrite')).put(word));
 }
 
+export async function putWords(words: Word[]): Promise<void> {
+  const tx = (await open()).transaction('words', 'readwrite');
+  for (const word of words) tx.objectStore('words').put(word);
+  await committed(tx);
+}
+
 export async function deleteWord(id: string): Promise<void> {
   const clips = await listClips(id);
   const tx = (await open()).transaction(['words', 'clips', 'videos'], 'readwrite');
