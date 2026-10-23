@@ -1,7 +1,7 @@
 // Copies the MediaPipe WASM runtime and downloads the landmark models into
 // public/mediapipe so the app runs without loading anything from a CDN.
 import { access, cp, mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,7 +24,12 @@ async function exists(path) {
 }
 
 await mkdir(join(out, 'models'), { recursive: true });
-await cp(join(root, 'node_modules', '@mediapipe', 'tasks-vision', 'wasm'), join(out, 'wasm'), { recursive: true });
+// The ES-module build of the runtime is never loaded (FilesetResolver picks the
+// SIMD or no-SIMD script), so leave it out to keep the deployed site smaller.
+await cp(join(root, 'node_modules', '@mediapipe', 'tasks-vision', 'wasm'), join(out, 'wasm'), {
+  recursive: true,
+  filter: (src) => !basename(src).startsWith('vision_wasm_module_internal'),
+});
 
 for (const [name, url] of Object.entries(MODELS)) {
   const dest = join(out, 'models', name);

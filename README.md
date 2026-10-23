@@ -3,6 +3,8 @@
 手話をカメラで記録し、お手本との動きの違いを点数とタイムラインで確かめる練習ツールです。
 ブラウザの中だけで動き、映像や記録はどこにも送信しません。
 
+公開版：https://rigelpain.github.io/shuwa-practice/
+
 - MediaPipe で手（両手21点ずつ）・上半身・表情を読み取ります
 - お手本と練習を DTW（動的時間伸縮法）で対応づけるので、速さが違っても比べられます
 - 「手の位置」「手の形」「表情」に分けて採点し、いちばんずれた場面と手を文章で示します
@@ -93,6 +95,9 @@ npm test          # 採点ロジックのテスト
 npm run typecheck # 型チェック
 npm run build     # 本番用ビルド（dist/）
 ```
+
+main にプッシュすると、GitHub Actions（[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)）がテストとビルドを行い、GitHub Pages に公開します。
+Pages ではサイトが `/<リポジトリ名>/` の下に置かれるため、ビルド時に `BASE_PATH` でその場所を渡しています。
 
 | ファイル | 役割 |
 | --- | --- |
