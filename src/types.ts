@@ -72,6 +72,8 @@ export interface Clip {
    * the video store and where the clip sits in it. Clips with only bones have none.
    */
   source?: { videoId: string; startMs: number; endMs: number };
+  /** Where the sample came from and on what grounds it may be used. Missing in older clips. */
+  origin?: Origin;
   /** Who signed it. Kept so training data can later be split by person. */
   signer: string;
   createdAt: number;
@@ -80,6 +82,23 @@ export interface Clip {
   height: number;
   durationMs: number;
   frames: Frame[];
+}
+
+/** On what grounds a sample may be used. */
+export type Permission = 'own' | 'granted' | 'license' | 'unknown';
+
+/** Where a sample came from: the video or course, who holds its rights, and why it may be used. */
+export interface Origin {
+  /** Name of the video, course or material. */
+  title: string;
+  url: string;
+  /** Creator, channel or organisation holding the rights. */
+  rightsHolder: string;
+  permission: Permission;
+  /** Licence name when permission is 'license', such as "CC BY 4.0". */
+  license: string;
+  /** How and when permission was given, or anything else worth keeping. */
+  note: string;
 }
 
 export interface Word {

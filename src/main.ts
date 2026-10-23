@@ -4,6 +4,7 @@ import { bodyFrame, type BodyFrame } from './features';
 import { ACCEPT_SCORE, recognize, Segmenter, segmentClip, type Recognition, type Segment, type Template } from './reader';
 import { parseSampleName } from './batch';
 import { applyCaptions, cutsFromSegments, framesIn, mergeWithNext, nudge, type Cut } from './cuts';
+import { describeOrigin, emptyOrigin, ownRecording } from './origin';
 import { MotionPlayer, type MotionItem } from './player';
 import { ClipRecorder, trimToHands } from './recorder';
 import { compareClips, type CompareResult, type Hint } from './scoring';
@@ -24,6 +25,8 @@ import {
   type ClipKind,
   type Frame,
   type FrameData,
+  type Origin,
+  type Permission,
   type Word,
 } from './types';
 
@@ -124,6 +127,14 @@ const ui = {
   cutterVariant: $<HTMLInputElement>('cutterVariant'),
   cutterSigner: $<HTMLInputElement>('cutterSigner'),
   cutterKeepVideo: $<HTMLInputElement>('cutterKeepVideo'),
+  cutterKeepBox: $('cutterKeepBox'),
+  cutterOrigin: $('cutterOrigin'),
+  cutterOriginEdit: $<HTMLButtonElement>('cutterOriginEdit'),
+  originDialog: $<HTMLDialogElement>('originDialog'),
+  originForm: $<HTMLFormElement>('originForm'),
+  originPurpose: $('originPurpose'),
+  exportUncleared: $<HTMLInputElement>('exportUncleared'),
+  motionCredit: $('motionCredit'),
   cutterCaptions: $<HTMLButtonElement>('cutterCaptions'),
   captionInput: $<HTMLInputElement>('captionInput'),
   cutterList: $('cutterList'),
@@ -196,6 +207,8 @@ interface Settings {
   showVideo: boolean;
   showBones: boolean;
   mode: Mode;
+  /** The origin last entered, offered again for the next video. */
+  lastOrigin: Origin;
   /** Version played in the speak mode when a word has it ('' for each word's main version). */
   speakVariant: string;
   /** After a word's first sample, move on to the next word that has none. */
@@ -214,6 +227,7 @@ const settings: Settings = (() => {
     showVideo: true,
     showBones: true,
     mode: 'record',
+    lastOrigin: emptyOrigin(),
     speakVariant: '',
     autoNext: true,
   };
@@ -239,6 +253,7 @@ let stream: MediaStream | null = null;
 let phase: Phase = 'idle';
 let recorder: ClipRecorder | null = null;
 let recordKind: Kind = 'practice';
+let recordOrigin: Origin = ownRecording();
 let autoStop = 0;
 let cancelCountdown: (() => void) | null = null;
 let importing: { file: File; url: string; cancelled: boolean } | null = null;
@@ -524,8 +539,9 @@ function countdown(seconds: number): Promise<boolean> {
   });
 }
 
-function beginRecording(kind: Kind, source: MediaStream | null): void {
+function beginRecording(kind: Kind, source: MediaStream | null, origin: Origin): void {
   recordKind = kind;
+  recordOrigin = origin;
   ui.recLabel.textContent = '記録中';
   recorder = new ClipRecorder(source);
   phase = 'recording';
@@ -545,7 +561,7 @@ async function record(kind: Kind): Promise<void> {
     updateControls();
     return;
   }
-  beginRecording(kind, stream);
+  beginRecording(kind, stream, ownRecording());
   autoStop = window.setTimeout(() => void finish(true), settings.maxSeconds * 1000);
 }
 
@@ -597,6 +613,7 @@ async function saveClip(frames: Frame[], video: Blob | null, kind: Kind): Promis
     frames: kept,
     kind,
     variant: selectedVariant,
+    origin: recordOrigin,
   };
   await db.putClip(clip);
   if (video && video.size > 0) await db.putVideo(clip.id, video);
@@ -684,7 +701,7 @@ async function importFile(file: File): Promise<void> {
   const kind: Kind = referenceClip() ? 'practice' : 'sample';
   try {
     const duration = await openVideoFile(file);
-    beginRecording(kind, null);
+    beginRecording(kind, null, pendingOrigin);
     ui.recLabel.textContent = '読み取り中';
     say(
       kind === 'sample'
@@ -777,7 +794,7 @@ async function importSampleFiles(files: File[]): Promise<void> {
     try {
       const duration = await openVideoFile(file);
       lastSaved = false;
-      beginRecording('sample', null);
+      beginRecording('sample', null, pendingOrigin);
       ui.recLabel.textContent = `${batch.done}/${batch.total} 読み取り中`;
       await scanVideo(duration, (data, t) => recorder?.push(data, t));
       const cancelled = importing?.cancelled ?? false;
@@ -822,6 +839,8 @@ interface Cutter {
   cuts: Cut[];
   body: BodyFrame;
   view: FigureView;
+  /** Where the video came from; every sample cut from it gets this. */
+  origin: Origin;
 }
 
 let cutter: Cutter | null = null;
@@ -877,6 +896,7 @@ async function openCutter(file: File): Promise<void> {
       cuts: cutsFromSegments(segments, suggest),
       body,
       view: fitView([{ frames, body }]),
+      origin: pendingOrigin,
     };
     ui.cutterVideo.src = cutter.url;
     ui.cutterSigner.value = settings.signer;
@@ -920,6 +940,13 @@ function renderCutter(): void {
   const c = cutter;
   const chosen = c.cuts.filter((cut) => cut.include && cut.label.trim()).length;
   ui.cutterSource.textContent = `${c.file.name}（${fmtClock(c.durationMs)}、区切り${c.cuts.length}個）`;
+  ui.cutterOrigin.textContent = `出典：${describeOrigin(c.origin)}`;
+  // Keeping someone's video needs a recorded reason it may be used.
+  const cleared = c.origin.permission !== 'unknown';
+  ui.cutterKeepVideo.disabled = !cleared;
+  if (!cleared) ui.cutterKeepVideo.checked = false;
+  ui.cutterKeepBox.classList.toggle('is-locked', !cleared);
+  ui.cutterKeepBox.title = cleared ? '' : '出典で使ってよい根拠を記録すると選べます';
   ui.cutterSave.textContent = `チェックした区間を見本にする（${chosen}件）`;
   ui.cutterSave.disabled = chosen === 0;
 
@@ -1058,6 +1085,7 @@ async function saveCuts(): Promise<void> {
       kind: 'sample',
       variant,
       signer,
+      origin: c.origin,
       createdAt: Date.now(),
       width: c.width,
       height: c.height,
@@ -1083,6 +1111,72 @@ async function saveCuts(): Promise<void> {
       (tooShort.length ? `手がほとんど映っていない区間は保存しませんでした：${tooShort.join('、')}` : ''),
     tooShort.length ? 'error' : 'info',
   );
+}
+
+// ---------------------------------------------------------------- origins
+
+/** The origin given for the video files about to be read. */
+let pendingOrigin: Origin = emptyOrigin();
+
+/** Shows the origin form filled with `initial`; resolves to what was entered, or null if cancelled. */
+function askOrigin(initial: Origin, purpose: string): Promise<Origin | null> {
+  const form = ui.originForm;
+  const field = (name: keyof Origin) => form.elements.namedItem(name) as HTMLInputElement | HTMLTextAreaElement;
+  for (const key of ['title', 'url', 'rightsHolder', 'license', 'note'] as const) field(key).value = initial[key];
+  const radio = form.querySelector<HTMLInputElement>(`input[name="permission"][value="${initial.permission}"]`);
+  if (radio) radio.checked = true;
+  ui.originPurpose.textContent = purpose;
+  ui.originDialog.showModal();
+  return new Promise((resolve) => {
+    // Answer on submit rather than on close: it happens within the click, so a
+    // file picker opened next still counts as user-initiated.
+    form.onsubmit = (e) => {
+      const submitter = e.submitter as HTMLButtonElement | null;
+      if (submitter?.value !== 'ok') {
+        resolve(null);
+        return;
+      }
+      const checked = form.querySelector<HTMLInputElement>('input[name="permission"]:checked');
+      resolve({
+        title: field('title').value.trim(),
+        url: field('url').value.trim(),
+        rightsHolder: field('rightsHolder').value.trim(),
+        permission: (checked?.value ?? 'unknown') as Permission,
+        license: field('license').value.trim(),
+        note: field('note').value.trim(),
+      });
+    };
+    // Escape closes the dialog without submitting.
+    ui.originDialog.oncancel = () => resolve(null);
+  });
+}
+
+/** Asks where the coming video files are from, then opens the file picker. */
+async function pickVideosFrom(input: HTMLInputElement, purpose: string): Promise<void> {
+  const origin = await askOrigin(settings.lastOrigin, purpose);
+  if (!origin) return;
+  pendingOrigin = origin;
+  settings.lastOrigin = origin;
+  saveSettings();
+  input.click();
+}
+
+async function editOrigin(clip: Clip): Promise<void> {
+  const origin = await askOrigin(clip.origin ?? emptyOrigin(), `この記録（${fmtDate(clip.createdAt)} 撮影）の出典`);
+  if (!origin) return;
+  clip.origin = origin;
+  await db.putClip(clip);
+  await loadClips();
+  await loadTemplates();
+  renderDetail();
+  if (viewerClipId === clip.id) await showVideo(clip);
+  say('出典を保存しました。');
+}
+
+/** Who signed a sample and where it came from, for showing next to it. */
+function creditLine(clip: Clip): string {
+  const origin = clip.origin && clip.origin.permission !== 'own' ? describeOrigin(clip.origin) : '';
+  return [clip.signer ? `手話：${clip.signer}` : '', origin ? `出典：${origin}` : ''].filter(Boolean).join('　');
 }
 
 /** Stop button, Escape and Space all end up here. */
@@ -1204,10 +1298,11 @@ async function showVideo(clip: Clip | null): Promise<void> {
   playerBox.hidden = false;
   viewer.hidden = !blob;
   viewer.onplay = viewer.ontimeupdate = null;
+  const credit = creditLine(clip);
   if (blob) {
     viewerUrl = URL.createObjectURL(blob);
     viewer.src = viewerUrl;
-    viewerCaption.textContent = `${kind}の動画（${fmtDate(clip.createdAt)} 撮影）`;
+    viewerCaption.textContent = `${kind}の動画（${fmtDate(clip.createdAt)} 撮影）${credit ? `　${credit}` : ''}`;
     if (source) {
       // Play only this clip's stretch of the longer video it was cut from.
       const [from, to] = [source.startMs / 1000, source.endMs / 1000];
@@ -1223,10 +1318,13 @@ async function showVideo(clip: Clip | null): Promise<void> {
           viewer.currentTime = from;
         }
       };
-      viewerCaption.textContent = `${kind}の動画（元の動画の ${fmtClockTenth(source.startMs)}〜${fmtClockTenth(source.endMs)}）`;
+      viewerCaption.textContent =
+        `${kind}の動画（元の動画の ${fmtClockTenth(source.startMs)}〜${fmtClockTenth(source.endMs)}）` +
+        (credit ? `　${credit}` : '');
     }
   } else {
-    viewerCaption.textContent = `この${kind}には動画がありません。手と体と表情の動き（ボーン）だけを持っています。`;
+    viewerCaption.textContent =
+      `この${kind}には動画がありません。手と体と表情の動き（ボーン）だけを持っています。` + (credit ? `　${credit}` : '');
   }
 }
 
@@ -1453,7 +1551,15 @@ function clipTable(ref: Clip | null, list: Clip[]): HTMLTableElement {
     return el(
       'tr',
       { className: [isRef ? 'is-ref' : '', shown?.attempt.id === clip.id ? 'is-open' : ''].join(' ').trim() },
-      el('td', { title: clip.signer ? `撮影者: ${clip.signer}` : '' }, fmtDate(clip.createdAt)),
+      el(
+        'td',
+        { title: clip.signer ? `撮影者: ${clip.signer}` : '' },
+        fmtDate(clip.createdAt),
+        el('small', {
+          className: clip.origin && clip.origin.permission !== 'unknown' ? 'origin-line' : 'origin-line is-unknown',
+          textContent: describeOrigin(clip.origin),
+        }),
+      ),
       el('td', { className: 'num', textContent: fmtSec(clip.durationMs) }),
       el('td', { className: 'num' }, scoreCell),
       el(
@@ -1461,6 +1567,7 @@ function clipTable(ref: Clip | null, list: Clip[]): HTMLTableElement {
         { className: 'actions' },
         !isSample && ref ? button('結果', () => showResult(clip.id)) : null,
         button('動画', () => void showVideo(clip)),
+        button('出典', () => void editOrigin(clip)),
         isSample ? null : button('見本にする', () => void makeSample(clip)),
         isSample && !isRef ? button('お手本にする', () => void makeReference(clip)) : null,
         button('削除', () => void removeClip(clip), 'danger'),
@@ -1603,6 +1710,7 @@ const spokenHistory: string[] = [];
 const player = new MotionPlayer(ui.motionCanvas, (index) => {
   const item = index === null ? null : spoken?.items[index];
   ui.motionWord.textContent = item ? withVariant(item.word.label, variantOf(item.clip)) : '';
+  ui.motionCredit.textContent = item ? creditLine(item.clip) : '';
   renderSentence(index);
 });
 player.flip = settings.mirrorView;
@@ -1946,10 +2054,17 @@ function tickDuet(now: number): void {
 // ---------------------------------------------------------------- data files
 
 async function exportAll(): Promise<void> {
-  const opts = { practice: ui.exportPractice.checked, videos: ui.exportVideos.checked };
-  const data = await db.exportData(opts);
+  const opts = {
+    practice: ui.exportPractice.checked,
+    videos: ui.exportVideos.checked,
+    uncleared: ui.exportUncleared.checked,
+  };
+  const { data, withheld } = await db.exportData(opts);
+  const unclearedNote = withheld
+    ? `許可が未確認の見本${withheld}件は入れていません。各記録の「出典」で記入するか、「許可を確認していない見本も含める」を選んでください。`
+    : '';
   if (!data.clips.length) {
-    say('書き出す見本がまだありません。');
+    say(`書き出せる見本がありません。${unclearedNote}`, withheld ? 'error' : 'info');
     return;
   }
   // Four decimals keep landmark precision while roughly halving the file.
@@ -1963,7 +2078,9 @@ async function exportAll(): Promise<void> {
   const practice = data.clips.length - samples;
   say(
     `${data.words.length}語、見本${samples}件${opts.practice ? `、練習${practice}件` : ''}を書き出しました` +
-      (opts.videos ? '（動画つき）。' : '（動画なし）。'),
+      (opts.videos ? '（動画つき）。' : '（動画なし）。') +
+      (data.credits?.length ? `出典${data.credits.length}件のクレジットも入っています。` : '') +
+      unclearedNote,
   );
 }
 
@@ -2077,7 +2194,8 @@ function bindEvents(): void {
   ui.recordRef.onclick = () => void record('sample');
   ui.recordTry.onclick = () => void record('practice');
   ui.stopRec.onclick = () => stop(true);
-  ui.pickFile.onclick = () => ui.fileInput.click();
+  ui.pickFile.onclick = () =>
+    settings.mode === 'record' ? void pickVideosFrom(ui.fileInput, '読み込む動画の出典') : ui.fileInput.click();
   ui.fileInput.onchange = () => {
     const file = ui.fileInput.files?.[0];
     ui.fileInput.value = '';
@@ -2107,8 +2225,17 @@ function bindEvents(): void {
   ui.copyTranscript.onclick = () => void copyTranscript();
 
   ui.addStarter.onclick = () => void addStarterVocabulary();
-  ui.pickSamples.onclick = () => ui.samplesInput.click();
-  ui.pickCut.onclick = () => ui.cutInput.click();
+  ui.pickSamples.onclick = () => void pickVideosFrom(ui.samplesInput, 'まとめて読み込む動画の出典（すべての動画に付きます）');
+  ui.pickCut.onclick = () => void pickVideosFrom(ui.cutInput, '切り出す動画の出典');
+  ui.cutterOriginEdit.onclick = async () => {
+    if (!cutter) return;
+    const origin = await askOrigin(cutter.origin, '切り出す動画の出典');
+    if (!origin || !cutter) return;
+    cutter.origin = origin;
+    settings.lastOrigin = origin;
+    saveSettings();
+    renderCutter();
+  };
   ui.cutInput.onchange = () => {
     const file = ui.cutInput.files?.[0];
     ui.cutInput.value = '';

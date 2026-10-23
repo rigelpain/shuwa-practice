@@ -1,4 +1,5 @@
-import { clipKind, referenceFor, referencesOf, setReference, type Clip, type Word } from './types';
+import { credits, isCleared } from './origin';
+import { clipKind, MAIN_VARIANT, referenceFor, referencesOf, setReference, type Clip, type Origin, type Word } from './types';
 
 const DB_NAME = 'shuwa-practice';
 
@@ -14,6 +15,8 @@ export interface ExportFile {
    * clip's id, or for clips cut from a longer video, that video's id.
    */
   videos?: Array<{ clipId: string; dataUrl: string }>;
+  /** Each source the samples came from and how many: the book's credits. Derived from the clips. */
+  credits?: Array<Origin & { samples: number }>;
 }
 
 let opening: Promise<IDBDatabase> | null = null;
@@ -122,12 +125,24 @@ function toDataUrl(blob: Blob): Promise<string> {
  * attempts and the videos. Landmarks alone are enough to recognise and to
  * practise against; videos make the file much larger.
  */
-export async function exportData(opts: { practice: boolean; videos: boolean }): Promise<ExportFile> {
-  const words = await listWords();
-  const byId = new Map(words.map((w) => [w.id, w]));
-  const clips = (await listAllClips()).filter(
+export async function exportData(opts: {
+  practice: boolean;
+  videos: boolean;
+  /** Include samples nobody has recorded permission for. */
+  uncleared: boolean;
+}): Promise<{ data: ExportFile; withheld: number }> {
+  const all = await listWords();
+  const byId = new Map(all.map((w) => [w.id, w]));
+  const wanted = (await listAllClips()).filter(
     (c) => byId.has(c.wordId) && (opts.practice || clipKind(c, byId.get(c.wordId)!) === 'sample'),
   );
+  const clips = wanted.filter((c) => opts.uncleared || isCleared(c));
+  // A reference left out of the file must not stay a reference in it.
+  const kept = new Set(clips.map((c) => c.id));
+  const words = all.map((w) => {
+    const refs = Object.fromEntries(Object.entries(referencesOf(w)).filter(([, id]) => kept.has(id)));
+    return { ...w, references: refs, referenceId: refs[MAIN_VARIANT] ?? Object.values(refs)[0] ?? null };
+  });
   // Write the kind out so the file does not depend on which clip was the reference.
   const withKind = clips.map((c) => ({ ...c, kind: clipKind(c, byId.get(c.wordId)!) }));
   const videos: NonNullable<ExportFile['videos']> = [];
@@ -140,12 +155,16 @@ export async function exportData(opts: { practice: boolean; videos: boolean }): 
     }
   }
   return {
-    format: 'shuwa-practice',
-    version: 2,
-    exportedAt: new Date().toISOString(),
-    words,
-    clips: withKind,
-    ...(opts.videos ? { videos } : {}),
+    data: {
+      format: 'shuwa-practice',
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      words,
+      clips: withKind,
+      credits: credits(clips),
+      ...(opts.videos ? { videos } : {}),
+    },
+    withheld: wanted.length - clips.length,
   };
 }
 

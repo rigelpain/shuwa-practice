@@ -44,6 +44,7 @@
           <div class="motion" id="motion" hidden>
             <canvas id="motionCanvas" aria-label="手話モーション"></canvas>
             <p class="motion-word" id="motionWord"></p>
+            <p class="motion-credit" id="motionCredit"></p>
           </div>
           <div class="viewport-empty" id="viewportEmpty">
             <p>カメラに上半身と両手が映るようにすると、手と体の動きを記録できます。</p>
@@ -80,7 +81,8 @@
           <div class="cutter-defaults">
             <label>版<input type="text" id="cutterVariant" list="variantNames" placeholder="基本" autocomplete="off" /></label>
             <label>手話をしている人<input type="text" id="cutterSigner" placeholder="任意" autocomplete="off" /></label>
-            <label class="check"><input type="checkbox" id="cutterKeepVideo" /> 元の動画も保存する（権利のある動画のときだけ）</label>
+            <span class="cutter-origin"><span id="cutterOrigin"></span> <button type="button" class="quiet" id="cutterOriginEdit">出典を変える</button></span>
+            <label class="check" id="cutterKeepBox"><input type="checkbox" id="cutterKeepVideo" /> 元の動画も保存する（許可のある動画のときだけ）</label>
             <button type="button" class="quiet" id="cutterCaptions">字幕ファイルを読み込む（.srt / .vtt）</button>
             <input type="file" id="captionInput" accept=".srt,.vtt,text/vtt" hidden />
           </div>
@@ -194,6 +196,7 @@
           <div class="data-io-options">
             <label class="check"><input type="checkbox" id="exportPractice" /> 練習の記録も含める</label>
             <label class="check"><input type="checkbox" id="exportVideos" /> 動画も含める（ファイルが大きくなります）</label>
+            <label class="check"><input type="checkbox" id="exportUncleared" /> 許可を確認していない見本も含める</label>
           </div>
         </div>
       </aside>
@@ -241,6 +244,30 @@
         </div>
       </div>
     </section>
+
+    <dialog class="origin-dialog" id="originDialog" aria-labelledby="originTitle">
+      <form method="dialog" id="originForm">
+        <h2 id="originTitle">出典</h2>
+        <p class="dialog-note" id="originPurpose"></p>
+        <p class="dialog-note">見本がどこから来たかを記録します。単語帳を共有すると一緒に渡り、再生するときにも表示します。</p>
+        <label>動画・講座・資料の名前<input type="text" name="title" autocomplete="off" /></label>
+        <label>URL<input type="url" name="url" placeholder="https://" autocomplete="off" /></label>
+        <label>権利者（作者・チャンネル・団体）<input type="text" name="rightsHolder" autocomplete="off" /></label>
+        <fieldset>
+          <legend>使ってよい根拠</legend>
+          <label class="check"><input type="radio" name="permission" value="own" /> 手話をしている本人が撮影した</label>
+          <label class="check"><input type="radio" name="permission" value="granted" /> 権利者から許可をもらった</label>
+          <label class="check"><input type="radio" name="permission" value="license" /> ライセンスで利用が認められている</label>
+          <label class="check"><input type="radio" name="permission" value="unknown" /> まだ確認していない</label>
+        </fieldset>
+        <label>ライセンス<input type="text" name="license" placeholder="例：CC BY 4.0" autocomplete="off" /></label>
+        <label>メモ<textarea name="note" rows="2" placeholder="例：2026年10月にメールで許可をもらった"></textarea></label>
+        <div class="dialog-actions">
+          <button type="submit" value="cancel" formnovalidate>キャンセル</button>
+          <button type="submit" value="ok" class="primary" id="originOk">この出典で記録する</button>
+        </div>
+      </form>
+    </dialog>
 
     <script type="module" src="/src/main.ts"></script>
   </body>
