@@ -105,4 +105,8 @@ npm run build     # 本番用ビルド（dist/）
 | `src/storage.ts` | IndexedDB への保存と JSON の書き出し |
 | `src/main.ts` | 画面の組み立てと操作 |
 
+## ライセンス
+
+[MIT License](LICENSE) です。
+
 MediaPipe のモデルは Google が Apache License 2.0 で配布しているものを、セットアップ時に取得しています。
