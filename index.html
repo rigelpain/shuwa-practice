@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>手話れんしゅう帳</title>
+    <meta name="description" content="手話をカメラで記録し、お手本との動きの違いを点数とタイムラインで確かめる練習ツール" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>手話れんしゅう帳</h1>
+      <p class="status" id="status" role="status">モデルを読み込んでいます</p>
+    </header>
+
+    <main class="layout">
+      <section class="stage" aria-label="撮影">
+        <div class="viewport mirrored" id="viewport">
+          <video id="video" playsinline muted></video>
+          <canvas id="overlay"></canvas>
+          <div class="viewport-empty" id="viewportEmpty">
+            <p>カメラに上半身と両手が映るようにすると、手と体の動きを記録できます。</p>
+            <button type="button" class="primary" id="startCamera">カメラを使う</button>
+          </div>
+          <div class="countdown" id="countdown" hidden></div>
+          <p class="rec-badge" id="recBadge" hidden>記録中 <span id="recTime">0.0</span>秒</p>
+        </div>
+
+        <div class="controls">
+          <button type="button" id="recordRef">お手本を撮る</button>
+          <button type="button" class="primary" id="recordTry">練習する</button>
+          <button type="button" class="stop" id="stopRec" hidden>停止</button>
+          <button type="button" class="quiet" id="pickFile">動画ファイルから読み込む</button>
+          <input type="file" id="fileInput" accept="video/*" hidden />
+        </div>
+        <p class="controls-hint" id="controlsHint"></p>
+        <p class="notice" id="notice" aria-live="polite"></p>
+
+        <details class="settings">
+          <summary>撮影と比較の設定</summary>
+          <div class="settings-grid">
+            <label>
+              <span>カウントダウン</span>
+              <select id="setCountdown">
+                <option value="0">なし</option>
+                <option value="3">3秒</option>
+                <option value="5">5秒</option>
+              </select>
+            </label>
+            <label>
+              <span>自動で止めるまで</span>
+              <select id="setMaxSeconds">
+                <option value="3">3秒</option>
+                <option value="4">4秒</option>
+                <option value="6">6秒</option>
+                <option value="10">10秒</option>
+              </select>
+            </label>
+            <label>
+              <span>撮影者の名前</span>
+              <input type="text" id="setSigner" placeholder="学習データの整理用（任意）" autocomplete="off" />
+            </label>
+            <label class="check"><input type="checkbox" id="setRecordFace" /> 表情も記録する</label>
+            <label class="check"><input type="checkbox" id="setUseFace" /> 表情も点数に入れる</label>
+            <label class="check"><input type="checkbox" id="setMirrorCompare" /> 利き手が逆の人として比べる</label>
+            <label class="check"><input type="checkbox" id="setMirrorView" /> 鏡のように左右反転して表示</label>
+          </div>
+        </details>
+      </section>
+
+      <aside class="ledger" aria-label="単語と記録">
+        <form class="add-word" id="addWord">
+          <label class="visually-hidden" for="wordInput">新しい単語</label>
+          <input type="text" id="wordInput" placeholder="単語を追加（例：ありがとう）" autocomplete="off" required />
+          <button type="submit">追加</button>
+        </form>
+        <ul class="word-list" id="wordList"></ul>
+        <div class="word-detail" id="wordDetail"></div>
+        <div class="data-io">
+          <button type="button" class="quiet" id="exportData">記録を書き出す（JSON）</button>
+          <button type="button" class="quiet" id="importData">記録を読み込む</button>
+          <input type="file" id="importInput" accept="application/json,.json" hidden />
+        </div>
+      </aside>
+    </main>
+
+    <section class="result" id="result" aria-label="比較結果" hidden>
+      <div class="result-summary">
+        <p class="result-of" id="resultOf"></p>
+        <p class="score"><span id="resultScore">0</span><span class="score-unit">点</span></p>
+        <dl class="parts">
+          <div class="part"><dt>手の位置</dt><dd><span class="bar"><span id="barLocation"></span></span><span id="partLocation"></span></dd></div>
+          <div class="part"><dt>手の形</dt><dd><span class="bar"><span id="barShape"></span></span><span id="partShape"></span></dd></div>
+          <div class="part"><dt>表情</dt><dd><span class="bar"><span id="barFace"></span></span><span id="partFace"></span></dd></div>
+        </dl>
+        <p class="advice" id="resultAdvice"></p>
+        <p class="speed" id="resultSpeed"></p>
+        <details class="raw">
+          <summary>計算の詳細</summary>
+          <dl id="resultRaw"></dl>
+        </details>
+      </div>
+
+      <div class="duet">
+        <div class="figures">
+          <figure>
+            <canvas id="refCanvas"></canvas>
+            <figcaption>お手本</figcaption>
+          </figure>
+          <figure>
+            <canvas id="tryCanvas"></canvas>
+            <figcaption>練習（薄い線がお手本）</figcaption>
+          </figure>
+        </div>
+        <div class="timeline">
+          <canvas id="timeline" aria-label="お手本とのずれ。色が濃いところほどずれが大きい"></canvas>
+          <input type="range" id="scrub" min="0" max="0" value="0" aria-label="再生位置" />
+        </div>
+        <div class="transport">
+          <button type="button" class="primary" id="playDuet">並べて再生</button>
+          <label class="check"><input type="checkbox" id="slowDuet" /> ゆっくり</label>
+          <label class="check"><input type="checkbox" id="ghostDuet" checked /> お手本を重ねる</label>
+          <span class="duet-time" id="duetTime"></span>
+          <span class="legend"><i class="dot left"></i>左手 <i class="dot right"></i>右手（手話をする人から見て）</span>
+        </div>
+      </div>
+    </section>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

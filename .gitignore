@@ -1,0 +1,39 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.log
+
+# MediaPipe runtime and models (fetched by `npm run setup`)
+public/mediapipe/
+
+# Secrets and tokens
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.secret
+secrets/
+credentials*.json
+.vercel/
+
+# AI assistant settings and notes
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+**/CLAUDE.md
+**/CLAUDE.local.md
+AGENTS.md
+.mcp.json
+
+# Exported practice data (contains people's recorded movements)
+shuwa-practice-*.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
