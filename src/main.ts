@@ -1,8 +1,8 @@
 import './style.css';
-import { drawFigure, drawOverlay, drawTimeline, fitCanvas, fitView, type FigureView } from './draw';
+import { drawFigure, drawOverlay, drawTimeline, fitCanvas, fitView, type Backdrop, type FigureView } from './draw';
 import { bodyFrame, type BodyFrame } from './features';
 import { ClipRecorder, trimToHands } from './recorder';
-import { compareClips, type CompareResult } from './scoring';
+import { compareClips, type CompareResult, type Hint } from './scoring';
 import * as db from './storage';
 import { Tracker, type LoadEvent, type LoadStep } from './tracker';
 import type { Clip, Frame, Word } from './types';
@@ -33,6 +33,10 @@ const ui = {
   video: $<HTMLVideoElement>('video'),
   overlay: $<HTMLCanvasElement>('overlay'),
   viewportEmpty: $('viewportEmpty'),
+  viewToggles: $('viewToggles'),
+  toggleVideo: $<HTMLButtonElement>('toggleVideo'),
+  toggleBones: $<HTMLButtonElement>('toggleBones'),
+  fps: $('fps'),
   startCamera: $<HTMLButtonElement>('startCamera'),
   countdown: $('countdown'),
   recBadge: $('recBadge'),
@@ -78,6 +82,7 @@ const partEls = {
   location: { bar: $('barLocation'), value: $('partLocation') },
   shape: { bar: $('barShape'), value: $('partShape') },
   face: { bar: $('barFace'), value: $('partFace') },
+  head: { bar: $('barHead'), value: $('partHead') },
 };
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -106,6 +111,9 @@ interface Settings {
   /** Compare as if the learner's dominant hand were the other one. */
   mirrorCompare: boolean;
   mirrorView: boolean;
+  /** Camera view: show the camera image, and the tracked bones over it. */
+  showVideo: boolean;
+  showBones: boolean;
 }
 
 const settings: Settings = (() => {
@@ -114,9 +122,11 @@ const settings: Settings = (() => {
     maxSeconds: 4,
     signer: '',
     recordFace: true,
-    useFace: false,
+    useFace: true,
     mirrorCompare: false,
     mirrorView: true,
+    showVideo: true,
+    showBones: true,
   };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') };
@@ -284,11 +294,33 @@ const overlayCtx = ui.overlay.getContext('2d')!;
 let lastVideoTime = -1;
 let trackingFailed = false;
 
+/** Processed frames per second, smoothed, and when it was last shown. */
+let fps = 0;
+let lastFrameAt = 0;
+let fpsShownAt = 0;
+
+function cameraView(): { backdrop: Backdrop; bones: boolean } {
+  const { showVideo, showBones } = settings;
+  // With bones on, the tracked frame is drawn under them so they line up; with bones off the live video shows through.
+  const backdrop: Backdrop = showBones ? (showVideo ? ui.video : 'dark') : showVideo ? null : 'dark';
+  return { backdrop, bones: showBones };
+}
+
+function countFrame(now: number): void {
+  if (lastFrameAt) fps = fps ? fps * 0.9 + (1000 / (now - lastFrameAt)) * 0.1 : 1000 / (now - lastFrameAt);
+  lastFrameAt = now;
+  if (now - fpsShownAt > 500) {
+    fpsShownAt = now;
+    ui.fps.textContent = `${Math.round(fps)} fps`;
+  }
+}
+
 function loop(): void {
   requestAnimationFrame(loop);
   const v = ui.video;
   if (!tracker || v.readyState < 2 || v.paused || v.currentTime === lastVideoTime) return;
   lastVideoTime = v.currentTime;
+  countFrame(performance.now());
 
   let data;
   try {
@@ -301,7 +333,7 @@ function loop(): void {
     }
     return;
   }
-  drawOverlay(overlayCtx, data);
+  drawOverlay(overlayCtx, data, cameraView());
 
   if (phase === 'recording' && recorder) {
     recorder.push(data);
@@ -321,7 +353,8 @@ async function startCamera(): Promise<void> {
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      // The models shrink every frame to 256px or less, so 540p loses nothing and keeps recordings and drawing light.
+      video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 30 } },
     });
   } catch (err) {
     const name = err instanceof DOMException ? err.name : '';
@@ -346,6 +379,8 @@ function attachCamera(): void {
   v.srcObject = stream;
   v.playbackRate = 1;
   ui.viewportEmpty.hidden = stream !== null;
+  ui.viewToggles.hidden = ui.fps.hidden = stream === null;
+  fps = lastFrameAt = 0;
   overlayCtx.clearRect(0, 0, ui.overlay.width, ui.overlay.height);
   if (stream) void v.play();
   else v.load();
@@ -509,8 +544,8 @@ async function importFile(file: File): Promise<void> {
     );
     for (let t = 0; t <= duration && !importing.cancelled; t += 1 / SCAN_FPS) {
       await seek(v, t);
-      const data = tracker.detect(v);
-      drawOverlay(overlayCtx, data);
+      const data = tracker.detect(v, true);
+      drawOverlay(overlayCtx, data, cameraView());
       recorder?.push(data, t * 1000);
       ui.recTime.textContent = `${t.toFixed(1)} / ${duration.toFixed(1)}`;
     }
@@ -766,15 +801,29 @@ function adviceText(res: CompareResult): string {
       ? 'お手本とよく合っています。'
       : '全体に少しずつずれています。並べて再生して見比べてください。';
   }
-  // Hints name hands in the reference's terms; when mirrored, the learner used the other hand.
-  const hand = settings.mirrorCompare && hint.hand ? (hint.hand === 'left' ? 'right' : 'left') : hint.hand;
-  const who = hint.part === 'face' ? '' : hand === 'left' ? '左手の' : hand === 'right' ? '右手の' : '両手の';
-  const what = { location: '位置', shape: '形', face: '表情や頭の動き' }[hint.part];
   const when = hint.whole
     ? '全体を通して'
     : `お手本の${(hint.startMs / 1000).toFixed(1)}〜${(hint.endMs / 1000).toFixed(1)}秒あたりで`;
+
+  if (hint.detail && hint.direction) {
+    const what = HINT_DETAILS[hint.detail];
+    return `${when}、${what}が${hint.direction === 'less' ? '小さめ' : '大きめ'}です。`;
+  }
+  // Hints name hands in the reference's terms; when mirrored, the learner used the other hand.
+  const hand = settings.mirrorCompare && hint.hand ? (hint.hand === 'left' ? 'right' : 'left') : hint.hand;
+  const who = hand === 'left' ? '左手の' : hand === 'right' ? '右手の' : '両手の';
+  const what = { location: '位置', shape: '形', face: '表情', head: '頭の動き' }[hint.part];
   return `${when}、${who}${what}がいちばんずれています。`;
 }
+
+const HINT_DETAILS: Record<NonNullable<Hint['detail']>, string> = {
+  yaw: '首を横に振る動き',
+  pitch: 'うなずき（首の縦の動き）',
+  roll: '首のかしげ',
+  brows: '眉の動き',
+  eyes: '目の開き方',
+  mouth: '口の動き',
+};
 
 function speedText(ratio: number): string {
   if (ratio > 1.15) return `お手本より${ratio.toFixed(1)}倍ゆっくりでした。`;
@@ -807,7 +856,7 @@ function showResult(clipId: string, scroll = true): void {
 
   ui.resultOf.textContent = `「${selectedWord()?.label ?? ''}」の練習（${fmtDate(attempt.createdAt)}）`;
   ui.resultScore.textContent = String(Math.round(res.score));
-  for (const part of ['location', 'shape', 'face'] as const) {
+  for (const part of ['location', 'shape', 'face', 'head'] as const) {
     const score = res.parts[part];
     const { bar, value } = partEls[part];
     bar.style.width = `${score ?? 0}%`;
@@ -817,15 +866,13 @@ function showResult(clipId: string, scroll = true): void {
   ui.resultAdvice.textContent = adviceText(res);
   ui.resultSpeed.textContent = speedText(res.speedRatio);
 
-  const faceNote = !settings.useFace
-    ? '比べていません（設定でオン）'
-    : res.raw.face === null
-      ? '表情の記録がないため比べていません'
-      : res.raw.face.toFixed(3);
+  const faceNote = (value: number | null, format: (v: number) => string) =>
+    !settings.useFace ? '比べていません（設定でオン）' : value === null ? '記録がないため比べていません' : format(value);
   const rows: Array<[string, string]> = [
     ['手首の位置のずれ', `${res.raw.location!.toFixed(3)}（肩幅を1とする）`],
     ['関節の位置のずれ', `${res.raw.shape!.toFixed(3)}（手の長さを1とする）`],
-    ['表情のずれ', faceNote],
+    ['表情のずれ', faceNote(res.raw.face, (v) => v.toFixed(3))],
+    ['頭の向きのずれ', faceNote(res.raw.head, (v) => `${v.toFixed(1)}°`)],
     ['フレーム数', `お手本 ${ref.frames.length}、練習 ${attempt.frames.length}`],
     ['対応づけたステップ数', String(res.path.length)],
   ];
@@ -994,6 +1041,17 @@ function bindSettings(): void {
     drawDuet();
   };
   ui.viewport.classList.toggle('mirrored', settings.mirrorView);
+
+  const bindToggle = (button: HTMLButtonElement, key: 'showVideo' | 'showBones') => {
+    button.setAttribute('aria-pressed', String(settings[key]));
+    button.onclick = () => {
+      settings[key] = !settings[key];
+      button.setAttribute('aria-pressed', String(settings[key]));
+      saveSettings();
+    };
+  };
+  bindToggle(ui.toggleVideo, 'showVideo');
+  bindToggle(ui.toggleBones, 'showBones');
 }
 
 function bindEvents(): void {

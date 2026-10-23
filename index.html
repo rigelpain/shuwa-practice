@@ -40,6 +40,11 @@
             <button type="button" class="primary" id="startCamera">カメラを使う</button>
             <ol class="load-steps" id="loadSteps" aria-label="モデルの読み込み" hidden></ol>
           </div>
+          <div class="view-toggles" id="viewToggles" role="group" aria-label="カメラ枠の表示" hidden>
+            <button type="button" id="toggleVideo" aria-pressed="true">映像</button>
+            <button type="button" id="toggleBones" aria-pressed="true">ボーン</button>
+          </div>
+          <p class="fps" id="fps" hidden></p>
           <div class="countdown" id="countdown" hidden></div>
           <p class="rec-badge" id="recBadge" hidden>記録中 <span id="recTime">0.0</span>秒</p>
         </div>
@@ -78,8 +83,8 @@
               <span>撮影者の名前</span>
               <input type="text" id="setSigner" placeholder="学習データの整理用（任意）" autocomplete="off" />
             </label>
-            <label class="check"><input type="checkbox" id="setRecordFace" /> 表情も記録する</label>
-            <label class="check"><input type="checkbox" id="setUseFace" /> 表情も点数に入れる</label>
+            <label class="check"><input type="checkbox" id="setRecordFace" /> 表情と頭の動きも記録する</label>
+            <label class="check"><input type="checkbox" id="setUseFace" /> 表情と頭の動きも点数に入れる</label>
             <label class="check"><input type="checkbox" id="setMirrorCompare" /> 利き手が逆の人として比べる</label>
             <label class="check"><input type="checkbox" id="setMirrorView" /> 鏡のように左右反転して表示</label>
           </div>
@@ -110,6 +115,7 @@
           <div class="part"><dt>手の位置</dt><dd><span class="bar"><span id="barLocation"></span></span><span id="partLocation"></span></dd></div>
           <div class="part"><dt>手の形</dt><dd><span class="bar"><span id="barShape"></span></span><span id="partShape"></span></dd></div>
           <div class="part"><dt>表情</dt><dd><span class="bar"><span id="barFace"></span></span><span id="partFace"></span></dd></div>
+          <div class="part"><dt>頭の動き</dt><dd><span class="bar"><span id="barHead"></span></span><span id="partHead"></span></dd></div>
         </dl>
         <p class="advice" id="resultAdvice"></p>
         <p class="speed" id="resultSpeed"></p>

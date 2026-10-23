@@ -1,4 +1,4 @@
-import { POSE, type BodyFrame } from './features';
+import { POSE, POSE_HAND, type BodyFrame } from './features';
 import { FACE_KEYS, type FaceKey, type FrameData } from './types';
 
 const HAND_LINKS: ReadonlyArray<readonly [number, number]> = [
@@ -18,6 +18,7 @@ const ARM_LINKS: ReadonlyArray<readonly [number, number]> = [
 ];
 
 interface Palette {
+  stage: string;
   ink: string;
   soft: string;
   line: string;
@@ -38,6 +39,7 @@ function palette(): Palette {
     const css = getComputedStyle(document.documentElement);
     const v = (name: string) => css.getPropertyValue(name).trim();
     cached = {
+      stage: v('--stage'),
       ink: v('--ink'),
       soft: v('--ink-soft'),
       line: v('--line'),
@@ -82,12 +84,20 @@ function strokeLinks(
   ctx.stroke();
 }
 
+/** Wrist to pinky, index and thumb, and across the knuckles, in POSE_HAND order. */
+const ROUGH_HAND_LINKS: ReadonlyArray<readonly [number, number]> = [
+  [0, 1], [0, 2], [0, 3], [1, 2],
+];
+
 function drawHands(ctx: CanvasRenderingContext2D, frame: FrameData, project: Project, size: number): void {
   const p = palette();
   for (const side of ['left', 'right'] as const) {
     const pts = frame[side];
-    if (!pts) continue;
     ctx.strokeStyle = ctx.fillStyle = p[side];
+    if (!pts) {
+      drawRoughHand(ctx, frame.pose, side, project, size);
+      continue;
+    }
     ctx.lineWidth = size;
     strokeLinks(ctx, pts, 3, HAND_LINKS, project);
     for (let k = 0; k < 21; k++) {
@@ -99,10 +109,50 @@ function drawHands(ctx: CanvasRenderingContext2D, frame: FrameData, project: Pro
   }
 }
 
-/** Live overlay on top of the camera image, in video pixel coordinates. */
-export function drawOverlay(ctx: CanvasRenderingContext2D, frame: FrameData): void {
+/**
+ * A dashed outline from the pose model's hand points, shown while the hand
+ * model has lost the hand (usually because it is behind the other one).
+ */
+function drawRoughHand(
+  ctx: CanvasRenderingContext2D,
+  pose: number[] | null,
+  side: 'left' | 'right',
+  project: Project,
+  size: number,
+): void {
+  const ids = POSE_HAND[side];
+  if (!pose || pose.length < (ids[3] + 1) * 4 || pose[ids[0] * 4 + 3] < 0.5) return;
+  const pts = ids.flatMap((i) => [pose[i * 4], pose[i * 4 + 1], 0]);
+  ctx.save();
+  ctx.lineWidth = size;
+  ctx.setLineDash([size * 2.5, size * 2]);
+  ctx.globalAlpha *= 0.8;
+  strokeLinks(ctx, pts, 3, ROUGH_HAND_LINKS, project);
+  ctx.restore();
+}
+
+/** What sits behind the bones: the frame they were tracked on, a dark fill, or nothing (the live video). */
+export type Backdrop = CanvasImageSource | 'dark' | null;
+
+/**
+ * Draws the camera view in video pixel coordinates. Drawing the tracked frame
+ * itself under the bones keeps the two in step; laying bones over the live
+ * video makes them trail behind fast hands.
+ */
+export function drawOverlay(
+  ctx: CanvasRenderingContext2D,
+  frame: FrameData,
+  view: { backdrop: Backdrop; bones: boolean },
+): void {
   const { width: w, height: h } = ctx.canvas;
   ctx.clearRect(0, 0, w, h);
+  if (view.backdrop === 'dark') {
+    ctx.fillStyle = palette().stage;
+    ctx.fillRect(0, 0, w, h);
+  } else if (view.backdrop) {
+    ctx.drawImage(view.backdrop, 0, 0, w, h);
+  }
+  if (!view.bones) return;
   const project: Project = (x, y) => [x * w, y * h];
   const size = Math.max(2, w / 400);
   ctx.lineCap = 'round';
@@ -209,43 +259,67 @@ function drawHead(
   const p = palette();
   const at = (i: number) => project(pose[i * 4], pose[i * 4 + 1]);
   let cx: number, cy: number, r: number;
+  // Tilt follows the line between the ears; turning shows as the nose sliding sideways.
+  let tilt = 0;
+  let turn = 0;
   if (vis(POSE.leftEar) && vis(POSE.rightEar)) {
     const [ax, ay] = at(POSE.leftEar);
     const [bx, by] = at(POSE.rightEar);
     cx = (ax + bx) / 2;
     cy = (ay + by) / 2;
-    r = (Math.hypot(ax - bx, ay - by) / 2) * 1.3;
+    const span = Math.hypot(ax - bx, ay - by);
+    r = (span / 2) * 1.3;
+    tilt = Math.atan2(ay - by, ax - bx);
+    if (tilt > Math.PI / 2) tilt -= Math.PI;
+    if (tilt < -Math.PI / 2) tilt += Math.PI;
+    if (vis(POSE.nose) && span > 0) {
+      const [nx, ny] = at(POSE.nose);
+      const along = ((nx - cx) * Math.cos(tilt) + (ny - cy) * Math.sin(tilt)) / (span / 2);
+      turn = Math.max(-1, Math.min(1, along));
+    }
   } else if (vis(POSE.nose)) {
     [cx, cy] = at(POSE.nose);
     r = size * 14;
   } else {
     return;
   }
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(tilt);
   ctx.strokeStyle = p.soft;
   ctx.lineWidth = size * 1.6;
   ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
   ctx.stroke();
-  if (!face) return;
 
-  // A small face glyph: brows rise with browInnerUp / browOuterUp, the mouth opens with jawOpen.
-  const s = (key: FaceKey) => face[faceIndex(key)];
-  const lift = s('browInnerUp') * 0.6 + (s('browOuterUpLeft') + s('browOuterUpRight')) * 0.2;
-  const lower = (s('browDownLeft') + s('browDownRight')) * 0.25;
-  const browY = cy - r * (0.28 + 0.3 * lift - 0.2 * lower);
+  const dx = turn * r * 0.45;
   ctx.strokeStyle = p.ink;
   ctx.lineWidth = size * 1.4;
   ctx.beginPath();
-  ctx.moveTo(cx - r * 0.55, browY);
-  ctx.lineTo(cx - r * 0.18, browY - r * 0.05);
-  ctx.moveTo(cx + r * 0.18, browY - r * 0.05);
-  ctx.lineTo(cx + r * 0.55, browY);
+  ctx.moveTo(dx, -r * 0.08);
+  ctx.lineTo(dx, r * 0.16);
   ctx.stroke();
-  const open = s('jawOpen');
-  const wide = 0.32 + 0.12 * (s('mouthSmileLeft') + s('mouthSmileRight')) / 2 - 0.15 * s('mouthPucker');
-  ctx.beginPath();
-  ctx.ellipse(cx, cy + r * 0.42, r * wide, r * (0.04 + 0.3 * open), 0, 0, Math.PI * 2);
-  ctx.stroke();
+
+  if (face) {
+    // Brows rise with browInnerUp / browOuterUp; the mouth opens with jawOpen.
+    const s = (key: FaceKey) => face[faceIndex(key)];
+    const lift = s('browInnerUp') * 0.6 + (s('browOuterUpLeft') + s('browOuterUpRight')) * 0.2;
+    const lower = (s('browDownLeft') + s('browDownRight')) * 0.25;
+    const browY = -r * (0.28 + 0.3 * lift - 0.2 * lower);
+    ctx.beginPath();
+    ctx.moveTo(dx - r * 0.55, browY);
+    ctx.lineTo(dx - r * 0.18, browY - r * 0.05);
+    ctx.moveTo(dx + r * 0.18, browY - r * 0.05);
+    ctx.lineTo(dx + r * 0.55, browY);
+    ctx.stroke();
+    const open = s('jawOpen');
+    const wide = 0.32 + (0.12 * (s('mouthSmileLeft') + s('mouthSmileRight'))) / 2 - 0.15 * s('mouthPucker');
+    ctx.beginPath();
+    ctx.ellipse(dx, r * 0.42, r * wide, r * (0.04 + 0.3 * open), 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function hexToRgb(hex: string): [number, number, number] {

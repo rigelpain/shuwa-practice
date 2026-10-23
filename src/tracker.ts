@@ -73,6 +73,9 @@ export class Tracker {
   private face: FaceLandmarker | null = null;
   private faceModel: Uint8Array | null = null;
   private lastTimestamp = 0;
+  private tick = 0;
+  private lastPose: NormalizedLandmark[] | null = null;
+  private lastFace: Pick<FrameData, 'face' | 'head'> = { face: null, head: null };
 
   private constructor(
     private readonly fileset: WasmFileset,
@@ -114,6 +117,10 @@ export class Tracker {
         baseOptions: { modelAssetBuffer: handModel, delegate },
         runningMode: 'VIDEO',
         numHands: 2,
+        // Lower than the 0.5 defaults so a hand partly covered by the other is not dropped at once.
+        minHandDetectionConfidence: 0.3,
+        minHandPresenceConfidence: 0.3,
+        minTrackingConfidence: 0.3,
       }),
     );
     report({ step: 'hands', loaded: handModel.length, total: handModel.length, done: true });
@@ -147,6 +154,7 @@ export class Tracker {
           runningMode: 'VIDEO',
           numFaces: 1,
           outputFaceBlendshapes: true,
+          outputFacialTransformationMatrixes: true,
         }),
       );
       onProgress({ step: 'face', loaded: model.length, total: model.length, done: true });
@@ -156,15 +164,31 @@ export class Tracker {
     }
   }
 
-  detect(source: HTMLVideoElement): FrameData {
+  /**
+   * Tracks one frame. Live camera frames run the hand model every time but take
+   * turns with the pose and face models, which change more slowly, so the frame
+   * rate stays up; the other one's last reading is reused. Pass `full` to run
+   * every model on every frame, as when reading a video file.
+   */
+  detect(source: HTMLVideoElement, full = false): FrameData {
     // MediaPipe needs strictly increasing timestamps, even across source changes.
     const timestamp = Math.max(performance.now(), this.lastTimestamp + 1);
     this.lastTimestamp = timestamp;
+    const odd = this.tick++ % 2 === 1;
+    // The face crop is placed from the pose, so the pose also runs whenever there is none yet.
+    const runFace = this.face !== null && (full || odd);
+    const runPose = full || !runFace || !this.lastPose;
 
-    const poseLandmarks = this.pose.detectForVideo(source, timestamp).landmarks[0] ?? null;
+    if (runPose) this.lastPose = this.pose.detectForVideo(source, timestamp).landmarks[0] ?? null;
     const handResult = this.hands.detectForVideo(source, timestamp);
-    const faceResult = this.face?.detectForVideo(this.faceCrop(source, poseLandmarks), timestamp) ?? null;
+    if (runFace) {
+      const result = this.face!.detectForVideo(this.faceCrop(source, this.lastPose), timestamp);
+      this.lastFace = { face: faceScores(result), head: headAngles(result) };
+    } else if (!this.face) {
+      this.lastFace = { face: null, head: null };
+    }
 
+    const poseLandmarks = this.lastPose;
     const pose = poseLandmarks
       ? poseLandmarks.slice(0, POSE_KEEP).flatMap((p) => [p.x, p.y, p.z, p.visibility ?? 0])
       : null;
@@ -176,7 +200,7 @@ export class Tracker {
       right: right === null ? null : flat(handResult.landmarks[right]),
       leftWorld: left === null ? null : flat(handResult.worldLandmarks[left]),
       rightWorld: right === null ? null : flat(handResult.worldLandmarks[right]),
-      face: faceScores(faceResult),
+      ...this.lastFace,
     };
   }
 
@@ -210,6 +234,21 @@ export class Tracker {
     width: FACE_CROP,
     height: FACE_CROP,
   });
+}
+
+/**
+ * Yaw, pitch and roll in degrees from the face's 4×4 transformation matrix,
+ * which MediaPipe stores column by column.
+ */
+function headAngles(result: FaceLandmarkerResult | null): number[] | null {
+  const m = result?.facialTransformationMatrixes[0]?.data;
+  if (!m) return null;
+  const deg = 180 / Math.PI;
+  return [
+    Math.asin(Math.max(-1, Math.min(1, -m[2]))) * deg,
+    Math.atan2(m[6], m[10]) * deg,
+    Math.atan2(m[1], m[0]) * deg,
+  ];
 }
 
 function faceScores(result: FaceLandmarkerResult | null): number[] | null {

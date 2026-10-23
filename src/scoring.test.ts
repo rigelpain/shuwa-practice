@@ -45,8 +45,10 @@ interface ClipSpec {
   flipX?: boolean;
   /** Blendshape scores per FACE_KEYS, or none. */
   face?: (u: number) => number[] | null;
-  /** Nose position in image coordinates. */
-  nose?: (u: number) => [number, number];
+  /** Head [yaw, pitch, roll] in degrees, or none. */
+  head?: (u: number) => [number, number, number] | null;
+  /** When true, the hand model misses the hand; the pose model still sees its wrist. */
+  hidden?: (u: number) => boolean;
 }
 
 function makeClip({
@@ -57,7 +59,8 @@ function makeClip({
   side = 'right',
   flipX = false,
   face = () => null,
-  nose = () => [0.5, 0.4],
+  head = () => null,
+  hidden = () => false,
 }: ClipSpec): Clip {
   const out: Frame[] = [];
   for (let n = 0; n < frames; n++) {
@@ -67,15 +70,17 @@ function makeClip({
     const world = pts.flat();
     const image = pts.flatMap(([x, y, z]) => [wx + (x * 0.5) / ASPECT, wy + y * 0.5, z * 0.5]);
     const p = pose();
-    p.splice(0, 2, ...nose(u));
+    p.splice((side === 'left' ? 15 : 16) * 4, 4, wx, wy, 0, 1);
+    const seen = !hidden(u);
     out.push({
       t: u * durationMs,
       pose: p,
-      left: side === 'left' ? image : null,
-      right: side === 'right' ? image : null,
-      leftWorld: side === 'left' ? world : null,
-      rightWorld: side === 'right' ? world : null,
+      left: seen && side === 'left' ? image : null,
+      right: seen && side === 'right' ? image : null,
+      leftWorld: seen && side === 'left' ? world : null,
+      rightWorld: seen && side === 'right' ? world : null,
       face: face(u),
+      head: head(u),
     });
   }
   return { id: 'c', wordId: 'w', signer: '', createdAt: 0, width: WIDTH, height: HEIGHT, durationMs, frames: out };
@@ -164,34 +169,69 @@ describe('compareClips', () => {
   });
 });
 
-describe('compareClips with the face', () => {
+describe('compareClips with the face and head', () => {
   const neutral = () => FACE_KEYS.map(() => 0.05);
   const raised = () => FACE_KEYS.map((k) => (k.startsWith('browInnerUp') || k.startsWith('browOuterUp') ? 0.7 : 0.05));
+  const still = (): [number, number, number] => [0, 0, 0];
   const withFace = { mirror: false, useFace: true };
+  const clip = (spec: Partial<ClipSpec>) =>
+    makeClip({ frames: 60, durationMs: 2000, path: arc, face: neutral, head: still, ...spec });
+  /** Holds still for the first fifth (the resting pose), then moves. */
+  const after = (u: number, move: number) => (u < 0.2 ? 0 : move);
 
-  it('ignores where the head sits and only compares how it moves', () => {
-    const ref = makeClip({ frames: 60, durationMs: 2000, path: arc, face: neutral });
-    const leaning = makeClip({ frames: 60, durationMs: 2000, path: arc, face: neutral, nose: () => [0.55, 0.42] });
-    expect(compareClips(ref, leaning, withFace).parts.face).toBeCloseTo(100, 5);
-
-    const nodding = makeClip({
-      frames: 60,
-      durationMs: 2000,
-      path: arc,
-      face: neutral,
-      nose: (u) => [0.5, 0.4 + 0.06 * Math.sin(4 * Math.PI * u)],
-    });
-    expect(compareClips(ref, nodding, withFace).parts.face!).toBeLessThan(90);
+  it('ignores a camera that sees the head turned the same way throughout', () => {
+    const ref = clip({});
+    const offAxis = clip({ head: () => [12, -6, 4] });
+    expect(compareClips(ref, offAxis, withFace).parts.head).toBeCloseTo(100, 5);
   });
 
-  it('marks down missing raised brows and points at the face', () => {
-    const ref = makeClip({ frames: 60, durationMs: 2000, path: arc, face: raised });
-    const flat = makeClip({ frames: 60, durationMs: 2000, path: arc, face: neutral });
-    const res = compareClips(ref, flat, withFace);
+  it('names a missing head shake', () => {
+    const ref = clip({ head: (u) => [after(u, 20 * Math.sin(6 * Math.PI * u)), 0, 0] });
+    const res = compareClips(ref, clip({}), withFace);
+    expect(res.parts.head!).toBeLessThan(60);
+    expect(res.hint).toMatchObject({ part: 'head', detail: 'yaw', direction: 'less' });
+  });
+
+  it('names a tilt held through a question', () => {
+    const ref = clip({ head: (u) => [0, 0, after(u, 15)] });
+    const res = compareClips(ref, clip({}), withFace);
+    expect(res.hint).toMatchObject({ part: 'head', detail: 'roll', direction: 'less' });
+  });
+
+  it('flips the direction of a turn when mirroring', () => {
+    const ref = clip({ head: (u) => [after(u, 15), 0, after(u, 10)] });
+    const mirrored = clip({ head: (u) => [after(u, -15), 0, after(u, -10)] });
+    expect(compareClips(ref, mirrored, withFace).parts.head!).toBeLessThan(40);
+    expect(compareClips(ref, mirrored, { ...withFace, mirror: true }).parts.head).toBeCloseTo(100, 5);
+  });
+
+  it('names missing raised brows', () => {
+    const res = compareClips(clip({ face: raised }), clip({}), withFace);
     expect(res.parts.face!).toBeLessThan(60);
     expect(res.parts.location).toBeCloseTo(100, 5);
-    expect(res.hint?.part).toBe('face');
-    expect(compareClips(ref, flat, opts).parts.face).toBeNull();
+    expect(res.hint).toMatchObject({ part: 'face', detail: 'brows', direction: 'less' });
+  });
+
+  it('leaves the face and head out when asked to', () => {
+    const res = compareClips(clip({ face: raised }), clip({}), opts);
+    expect(res.parts.face).toBeNull();
+    expect(res.parts.head).toBeNull();
+  });
+});
+
+describe('a hand hidden behind the other', () => {
+  it('is still compared by where the pose model puts its wrist', () => {
+    const ref = makeClip({ frames: 60, durationMs: 2000, path: arc });
+    const covered = makeClip({ frames: 60, durationMs: 2000, path: arc, hidden: (u) => u > 0.3 && u < 0.7 });
+    // The same clip if the pose model had not seen the wrist either.
+    const unseen = {
+      ...covered,
+      frames: covered.frames.map((f) => (f.right ? f : { ...f, pose: f.pose!.map((v, k) => (k === 16 * 4 + 3 ? 0 : v)) })),
+    };
+
+    const res = compareClips(ref, covered, opts);
+    expect(res.parts.location!).toBeGreaterThan(95);
+    expect(res.parts.location!).toBeGreaterThan(compareClips(ref, unseen, opts).parts.location! + 20);
   });
 });
 

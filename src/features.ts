@@ -1,6 +1,9 @@
 import { FACE_KEYS, type Clip, type FaceKey } from './types';
 
-/** MediaPipe pose indices used here. Points 0–16 are stored with each frame. */
+/**
+ * MediaPipe pose indices used here. Points 0–22 are stored with each frame
+ * (clips recorded before hand points were added stop at 16).
+ */
 export const POSE = {
   nose: 0,
   leftEar: 7,
@@ -12,7 +15,16 @@ export const POSE = {
   leftWrist: 15,
   rightWrist: 16,
 } as const;
-export const POSE_KEEP = 17;
+export const POSE_KEEP = 23;
+
+/**
+ * The pose model's rough hand points: wrist, pinky, index and thumb. It keeps
+ * estimating them while one hand covers the other and the hand model loses it.
+ */
+export const POSE_HAND = {
+  left: [15, 17, 19, 21],
+  right: [16, 18, 20, 22],
+} as const;
 
 /** Where the signer's body sits in the image, so clips filmed differently line up. */
 export interface BodyFrame {
@@ -27,8 +39,11 @@ export interface BodyFrame {
 export interface HandFeature {
   /** Wrist position relative to the shoulder centre, in shoulder widths. */
   loc: [number, number];
-  /** 21 joints as [x, y, z] relative to the wrist, in hand lengths (wrist to middle-finger base). */
-  shape: Float32Array;
+  /**
+   * 21 joints as [x, y, z] relative to the wrist, in hand lengths (wrist to
+   * middle-finger base). Null when only the pose model saw this hand.
+   */
+  shape: Float32Array | null;
 }
 
 export interface FrameFeature {
@@ -37,16 +52,19 @@ export interface FrameFeature {
   /** FACE_KEYS scores, smoothed over neighbouring frames. */
   face: Float32Array | null;
   /**
-   * Nose offset from where it usually sits in this clip, in shoulder widths.
-   * Nods and head shakes show up here; posture and camera angle do not.
+   * [yaw, pitch, roll] in degrees, relative to how the head was held at the
+   * start of the clip. Shakes, nods and tilts show up here, including a tilt
+   * held through a question; a camera placed off to one side does not.
    */
-  head: [number, number] | null;
+  head: [number, number, number] | null;
 }
 
 /** Hand dropouts up to this many frames are filled by interpolation. */
 const MAX_GAP = 5;
-/** Blendshapes jitter from frame to frame, so they are averaged over ±this many frames. */
+/** Face readings jitter from frame to frame, so they are averaged over ±this many frames. */
 const FACE_SMOOTH = 2;
+/** The resting head pose is taken from this share of the clip's first frames. */
+const HEAD_BASELINE = 0.15;
 
 function median(values: number[]): number {
   const s = [...values].sort((a, b) => a - b);
@@ -91,20 +109,29 @@ function handFeature(image: number[], world: number[] | null, body: BodyFrame, s
   return { loc, shape };
 }
 
+/** The wrist position from the pose model, for frames where the hand model lost the hand. */
+function poseHand(pose: number[] | null, side: 'left' | 'right', body: BodyFrame, sx: number): HandFeature | null {
+  const i = POSE_HAND[side][0] * 4;
+  if (!pose || pose.length <= i + 3 || pose[i + 3] < 0.5) return null;
+  const [x, y] = [pose[i], pose[i + 1]];
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return { loc: [(sx * (x * body.aspect - body.cx)) / body.scale, (y - body.cy) / body.scale], shape: null };
+}
+
 function blend(hands: HandFeature[], weights: number[]): HandFeature {
   const loc: [number, number] = [0, 0];
-  const shape = new Float32Array(63);
+  const shape = hands.every((h) => h.shape) ? new Float32Array(63) : null;
   let total = 0;
   hands.forEach((h, n) => {
     const w = weights[n];
     total += w;
     loc[0] += h.loc[0] * w;
     loc[1] += h.loc[1] * w;
-    for (let k = 0; k < 63; k++) shape[k] += h.shape[k] * w;
+    if (shape) for (let k = 0; k < 63; k++) shape[k] += h.shape![k] * w;
   });
   loc[0] /= total;
   loc[1] /= total;
-  for (let k = 0; k < 63; k++) shape[k] /= total;
+  if (shape) for (let k = 0; k < 63; k++) shape[k] /= total;
   return { loc, shape };
 }
 
@@ -125,14 +152,14 @@ function fillGaps(seq: (HandFeature | null)[]): void {
   }
 }
 
-/** 1-2-1 smoothing over the neighbours that are present. */
+/** 1-2-1 smoothing over the neighbours that are present and of the same kind. */
 function smooth(seq: (HandFeature | null)[]): (HandFeature | null)[] {
   return seq.map((h, i) => {
     if (!h) return null;
     const hands = [h];
     const weights = [2];
     for (const n of [seq[i - 1], seq[i + 1]]) {
-      if (n) {
+      if (n && !n.shape === !h.shape) {
         hands.push(n);
         weights.push(1);
       }
@@ -160,39 +187,51 @@ export function extractFeatures(clip: Clip, mirror = false): FrameFeature[] {
     const left = hand(f.left, f.leftWorld);
     const right = hand(f.right, f.rightWorld);
     const face = f.face;
-    const nose = f.pose && f.pose[POSE.nose * 4 + 3] > 0.5 ? f.pose : null;
+    const head = f.head;
     return {
       left: mirror ? right : left,
       right: mirror ? left : right,
       face: face ? Float32Array.from(mirror ? MIRRORED_FACE.map((i) => face[i]) : face) : null,
-      head: nose
-        ? [(sx * (nose[0] * body.aspect - body.cx)) / body.scale, (nose[1] - body.cy) / body.scale]
-        : null,
+      // A mirror image turns and tilts the other way; nodding is unchanged.
+      head: head ? [sx * head[0], head[1], sx * head[2]] : null,
     };
   });
 
   for (const side of ['left', 'right'] as const) {
+    // After mirroring, the feature's left hand is the signer's right one.
+    const source = mirror ? (side === 'left' ? 'right' : 'left') : side;
     const seq = features.map((f) => f[side]);
     fillGaps(seq);
-    smooth(seq).forEach((h, i) => {
+    // Gaps too long to bridge (one hand hidden behind the other) keep at least the wrist position.
+    const filled = seq.map((h, i) => h ?? poseHand(clip.frames[i].pose, source, body, sx));
+    smooth(filled).forEach((h, i) => {
       features[i][side] = h;
     });
   }
 
   const faces = features.map((f) => f.face);
   faces.forEach((face, i) => {
-    if (!face) return;
-    const near = faces.slice(Math.max(0, i - FACE_SMOOTH), i + FACE_SMOOTH + 1).filter((f) => f !== null);
-    const mean = new Float32Array(face.length);
-    for (const f of near) for (let k = 0; k < f.length; k++) mean[k] += f[k] / near.length;
-    features[i].face = mean;
+    if (face) features[i].face = Float32Array.from(averageNear(faces, i));
   });
 
-  const heads = features.flatMap((f) => (f.head ? [f.head] : []));
-  if (heads.length) {
-    const hx = median(heads.map((h) => h[0]));
-    const hy = median(heads.map((h) => h[1]));
-    for (const f of features) if (f.head) f.head = [f.head[0] - hx, f.head[1] - hy];
+  const heads = features.map((f) => f.head);
+  const known = heads.filter((h) => h !== null);
+  if (known.length) {
+    const rest = known.slice(0, Math.max(3, Math.round(known.length * HEAD_BASELINE)));
+    const base = [0, 1, 2].map((k) => median(rest.map((h) => h[k])));
+    heads.forEach((head, i) => {
+      if (!head) return;
+      const [yaw, pitch, roll] = averageNear(heads, i);
+      features[i].head = [yaw - base[0], pitch - base[1], roll - base[2]];
+    });
   }
   return features;
+}
+
+/** The mean of the readings within ±FACE_SMOOTH frames of i that are present. */
+function averageNear(seq: (ArrayLike<number> | null)[], i: number): number[] {
+  const near = seq.slice(Math.max(0, i - FACE_SMOOTH), i + FACE_SMOOTH + 1).filter((v) => v !== null);
+  const mean = new Array<number>(near[0].length).fill(0);
+  for (const v of near) for (let k = 0; k < mean.length; k++) mean[k] += v[k] / near.length;
+  return mean;
 }

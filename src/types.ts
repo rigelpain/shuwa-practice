@@ -41,6 +41,11 @@ export interface Frame {
   rightWorld: number[] | null;
   /** FACE_KEYS scores, 0–1. */
   face: number[] | null;
+  /**
+   * Head orientation as [yaw, pitch, roll] in degrees: shaking, nodding and
+   * tilting. Missing in clips recorded before head tracking was added.
+   */
+  head?: number[] | null;
 }
 
 export type FrameData = Omit<Frame, 't'>;
