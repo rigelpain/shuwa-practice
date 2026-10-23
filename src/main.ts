@@ -12,7 +12,7 @@ import { toSigns, type Token } from './sentence';
 import { parseSubtitles } from './subtitles';
 import { Listener, speechSupported } from './speech';
 import * as db from './storage';
-import { Tracker, type LoadEvent, type LoadStep } from './tracker';
+import { Tracker, type FrameSource, type LoadEvent, type LoadStep } from './tracker';
 import { STARTER_VOCABULARY } from './vocabulary';
 import {
   clipKind,
@@ -100,6 +100,7 @@ const ui = {
   recordTry: $<HTMLButtonElement>('recordTry'),
   stopRec: $<HTMLButtonElement>('stopRec'),
   pickFile: $<HTMLButtonElement>('pickFile'),
+  shareScreen: $<HTMLButtonElement>('shareScreen'),
   fileInput: $<HTMLInputElement>('fileInput'),
   controlsHint: $('controlsHint'),
   notice: $('notice'),
@@ -120,6 +121,7 @@ const ui = {
   pickSamples: $<HTMLButtonElement>('pickSamples'),
   samplesInput: $<HTMLInputElement>('samplesInput'),
   pickCut: $<HTMLButtonElement>('pickCut'),
+  pickScreenCut: $<HTMLButtonElement>('pickScreenCut'),
   cutInput: $<HTMLInputElement>('cutInput'),
   cutter: $('cutter'),
   cutterClose: $<HTMLButtonElement>('cutterClose'),
@@ -442,13 +444,20 @@ function countFrame(now: number): void {
 function loop(): void {
   requestAnimationFrame(loop);
   const v = ui.video;
+  // A shared screen read frame by frame is handled by readScreenFrames instead.
+  if (screen?.frames) return;
   if (!tracker || v.readyState < 2 || v.paused || v.currentTime === lastVideoTime) return;
   lastVideoTime = v.currentTime;
-  countFrame(performance.now());
+  liveFrame(v, v.videoWidth / v.videoHeight);
+}
 
+/** Tracks one live frame from the camera or a shared screen and passes it on. */
+function liveFrame(source: FrameSource, aspect: number): void {
+  if (!tracker) return;
+  countFrame(performance.now());
   let data;
   try {
-    data = tracker.detect(v);
+    data = tracker.detect(source);
   } catch (err) {
     if (!trackingFailed) {
       trackingFailed = true;
@@ -457,18 +466,149 @@ function loop(): void {
     }
     return;
   }
-  drawOverlay(overlayCtx, data, cameraView());
+  const view = cameraView();
+  // A frame taken from the stream is the very frame tracked, so it can sit under the bones.
+  if (source instanceof VideoFrame && view.backdrop === ui.video) view.backdrop = source;
+  drawOverlay(overlayCtx, data, view);
 
   if (phase === 'recording' && recorder) {
     recorder.push(data);
     ui.recTime.textContent = (recorder.elapsedMs / 1000).toFixed(1);
   }
+  if (screen?.capture) {
+    screen.capture.push(data);
+    ui.recTime.textContent = (screen.capture.elapsedMs / 1000).toFixed(1);
+  }
   if (settings.mode === 'read' && phase === 'idle' && !importing) {
-    live ??= { segmenter: new Segmenter(v.videoWidth / v.videoHeight), startedAt: performance.now() };
+    live ??= { segmenter: new Segmenter(aspect), startedAt: performance.now() };
     const sign = live.segmenter.push(data, performance.now() - live.startedAt);
     showPending(live.segmenter.active);
-    if (sign) readSign(sign, `カメラ ${fmtClock(sign.startMs)}`);
+    if (sign) readSign(sign, `${screen ? '画面' : 'カメラ'} ${fmtClock(sign.startMs)}`);
   }
+}
+
+// ---------------------------------------------------------------- shared screen
+
+/** Chrome's way to read a video track frame by frame; it keeps going while the tab is hidden. */
+interface TrackProcessor {
+  readable: ReadableStream<VideoFrame>;
+}
+type TrackProcessorConstructor = new (init: { track: MediaStreamTrack; maxBufferSize?: number }) => TrackProcessor;
+const TrackProcessorClass = (window as unknown as { MediaStreamTrackProcessor?: TrackProcessorConstructor })
+  .MediaStreamTrackProcessor;
+
+const screenSupported = () => typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+
+interface Screen {
+  stream: MediaStream;
+  /** 'read' captions it live; 'cut' collects its frames to cut samples from. */
+  purpose: 'read' | 'cut';
+  /** Frames read straight from the track, when the browser can. */
+  frames: ReadableStreamDefaultReader<VideoFrame> | null;
+  capture: ClipRecorder | null;
+  origin: Origin;
+  width: number;
+  height: number;
+}
+
+let screen: Screen | null = null;
+let cameraStream: MediaStream | null = null;
+
+/** Shares a screen, window or tab: to caption it, or to cut samples from what it plays. */
+async function startScreen(purpose: Screen['purpose'], origin: Origin = emptyOrigin()): Promise<void> {
+  if (!tracker || phase !== 'idle' || screen || !screenSupported()) return;
+  let display: MediaStream;
+  try {
+    display = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30 } }, audio: false });
+  } catch (err) {
+    const name = err instanceof DOMException ? err.name : '';
+    say(name === 'NotAllowedError' ? '画面共有をやめました。' : `画面を共有できませんでした（${errorText(err)}）。`);
+    return;
+  }
+  const track = display.getVideoTracks()[0];
+  const { width = 1280, height = 720 } = track.getSettings();
+  const reader = TrackProcessorClass
+    ? new TrackProcessorClass({ track: track.clone(), maxBufferSize: 1 }).readable.getReader()
+    : null;
+  screen = {
+    stream: display,
+    purpose,
+    frames: reader,
+    capture: purpose === 'cut' ? new ClipRecorder(display) : null,
+    origin,
+    width,
+    height,
+  };
+  track.addEventListener('ended', () => void stopScreen());
+  stream = display;
+  attachCamera();
+  if (purpose === 'cut') {
+    closeCutter();
+    hideResult();
+    phase = 'reading';
+    ui.recLabel.textContent = '画面を取り込み中';
+    ui.recTime.textContent = '0.0';
+    ui.recBadge.hidden = false;
+  }
+  updateControls();
+  say(
+    (purpose === 'cut'
+      ? '共有した画面で動画を再生してください。終わったら「取り込みを終える」を押すか、ブラウザの「共有を停止」を押してください。'
+      : '共有した画面の手話を読み取っています。') +
+      (reader
+        ? 'このアプリが裏に回っても読み取りは続きます。'
+        : 'このブラウザでは、このアプリのウィンドウが見えている間だけ読み取れます。共有する画面と並べて置いてください。'),
+  );
+  if (reader) void readScreenFrames(screen, reader);
+}
+
+async function readScreenFrames(s: Screen, reader: ReadableStreamDefaultReader<VideoFrame>): Promise<void> {
+  const aspect = s.width / s.height;
+  for (;;) {
+    const { value: frame, done } = await reader.read();
+    if (done || screen !== s) {
+      frame?.close();
+      break;
+    }
+    try {
+      liveFrame(frame, aspect);
+    } finally {
+      frame.close();
+    }
+  }
+}
+
+async function stopScreen(): Promise<void> {
+  const s = screen;
+  if (!s) return;
+  screen = null;
+  void s.frames?.cancel();
+  const video = (await s.capture?.stop()) ?? null;
+  for (const track of s.stream.getTracks()) track.stop();
+  stream = cameraStream;
+  attachCamera();
+  if (s.capture) {
+    ui.recBadge.hidden = true;
+    phase = 'idle';
+    const frames = s.capture.frames;
+    const durationMs = frames.at(-1)?.t ?? 0;
+    if (!video || frames.length < MIN_FRAMES) {
+      say('取り込めた映像が短すぎました。共有した画面で手話の動画を再生してから「取り込みを終える」を押してください。', 'error');
+    } else {
+      presentCutter({
+        name: `画面共有（${fmtDate(Date.now())}）`,
+        video,
+        frames,
+        width: s.width,
+        height: s.height,
+        durationMs,
+        origin: s.origin,
+      });
+    }
+  } else {
+    say('画面共有をやめました。');
+  }
+  updateControls();
 }
 
 function sizeOverlay(): void {
@@ -481,7 +621,7 @@ function sizeOverlay(): void {
 
 async function startCamera(): Promise<void> {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
+    cameraStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       // The models shrink every frame to 256px or less, so 540p loses nothing and keeps recordings and drawing light.
       video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 30 } },
@@ -499,13 +639,19 @@ async function startCamera(): Promise<void> {
     return;
   }
   say('');
-  attachCamera();
+  // A shared screen stays on view until it ends; the camera takes over then.
+  if (!screen) {
+    stream = cameraStream;
+    attachCamera();
+  }
   updateControls();
 }
 
 function attachCamera(): void {
   const v = ui.video;
   live = null;
+  // A shared screen is not a selfie, so it is never shown mirrored.
+  ui.viewport.classList.toggle('mirrored', settings.mirrorView && !screen);
   v.removeAttribute('src');
   v.srcObject = stream;
   v.playbackRate = 1;
@@ -833,7 +979,10 @@ async function importSampleFiles(files: File[]): Promise<void> {
 // ---------------------------------------------------------------- cutting a long video
 
 interface Cutter {
-  file: File;
+  /** File name, or a label for a shared screen. */
+  name: string;
+  /** The video it was cut from, kept in memory for previews and saved only when asked. */
+  video: Blob;
   url: string;
   /** Every tracked frame of the video, timed from its start. */
   frames: Frame[];
@@ -869,51 +1018,12 @@ async function openCutter(file: File): Promise<void> {
     say(`「${file.name}」の手話の区切りを探しています。`);
 
     const frames: Frame[] = [];
-    const segments: Segment[] = [];
-    const segmenter = new Segmenter(width / height);
-    await scanVideo(duration, (data, t) => {
-      frames.push({ t, ...data });
-      const sign = segmenter.push(data, t);
-      if (sign) segments.push(sign);
-    });
-    const last = segmenter.flush();
-    if (last) segments.push(last);
+    await scanVideo(duration, (data, t) => frames.push({ t, ...data }));
     if (importing?.cancelled) {
       say('切り出しをやめました。');
       return;
     }
-
-    const opts = { mirror: settings.mirrorCompare, useFace: settings.useFace };
-    const suggest = (sign: Segment) => {
-      if (!templates.length) return null;
-      const rec = recognize(segmentClip(sign, width, height), templates, opts);
-      return rec.word ? rec.candidates[0] : null;
-    };
-    const body = bodyFrame({ frames, width, height });
-    cutter = {
-      file,
-      url: URL.createObjectURL(file),
-      frames,
-      width,
-      height,
-      durationMs: duration * 1000,
-      cuts: cutsFromSegments(segments, suggest),
-      body,
-      view: fitView([{ frames, body }]),
-      origin: pendingOrigin,
-    };
-    ui.cutterVideo.src = cutter.url;
-    ui.cutterSigner.value = settings.signer;
-    // Keeping a video needs the right to it, so each new video starts with bones only.
-    ui.cutterKeepVideo.checked = false;
-    hideResult();
-    renderCutter();
-    const named = cutter.cuts.filter((c) => c.label).length;
-    say(
-      `${segments.length}個の区切りが見つかりました` +
-        (named ? `。そのうち${named}個は、似ている見本から単語名を入れています` : '') +
-        '。単語名を確かめて、見本にする区間にチェックを入れてください。',
-    );
+    presentCutter({ name: file.name, video: file, frames, width, height, durationMs: duration * 1000, origin: pendingOrigin });
   } catch (err) {
     say(`動画を読み込めませんでした（${errorText(err)}）。`, 'error');
   } finally {
@@ -922,6 +1032,48 @@ async function openCutter(file: File): Promise<void> {
     phase = 'idle';
     updateControls();
   }
+}
+
+/** Finds the signs in tracked frames and lists them for naming. */
+function presentCutter(input: Pick<Cutter, 'name' | 'video' | 'frames' | 'width' | 'height' | 'durationMs' | 'origin'>): void {
+  const { frames, width, height } = input;
+  const segments: Segment[] = [];
+  const segmenter = new Segmenter(width / height);
+  for (const frame of frames) {
+    const sign = segmenter.push(frame, frame.t);
+    if (sign) segments.push(sign);
+  }
+  const last = segmenter.flush();
+  if (last) segments.push(last);
+
+  const opts = { mirror: settings.mirrorCompare, useFace: settings.useFace };
+  const suggest = (sign: Segment) => {
+    if (!templates.length) return null;
+    const rec = recognize(segmentClip(sign, width, height), templates, opts);
+    return rec.word ? rec.candidates[0] : null;
+  };
+  const body = bodyFrame({ frames, width, height });
+  closeCutter();
+  cutter = {
+    ...input,
+    url: URL.createObjectURL(input.video),
+    cuts: cutsFromSegments(segments, suggest),
+    body,
+    view: fitView([{ frames, body }]),
+  };
+  ui.cutterVideo.src = cutter.url;
+  ui.cutterSigner.value = settings.signer;
+  // Keeping a video needs the right to it, so each new video starts with bones only.
+  ui.cutterKeepVideo.checked = false;
+  hideResult();
+  renderCutter();
+  updateControls();
+  const named = cutter.cuts.filter((c) => c.label).length;
+  say(
+    `${segments.length}個の区切りが見つかりました` +
+      (named ? `。そのうち${named}個は、似ている見本から単語名を入れています` : '') +
+      '。単語名を確かめて、見本にする区間にチェックを入れてください。',
+  );
 }
 
 function closeCutter(): void {
@@ -943,7 +1095,7 @@ function renderCutter(): void {
   if (!cutter) return;
   const c = cutter;
   const chosen = c.cuts.filter((cut) => cut.include && cut.label.trim()).length;
-  ui.cutterSource.textContent = `${c.file.name}（${fmtClock(c.durationMs)}、区切り${c.cuts.length}個）`;
+  ui.cutterSource.textContent = `${c.name}（${fmtClock(c.durationMs)}、区切り${c.cuts.length}個）`;
   ui.cutterOrigin.textContent = `出典：${describeOrigin(c.origin)}`;
   // Keeping someone's video needs a recorded reason it may be used.
   const cleared = c.origin.permission !== 'unknown';
@@ -1102,7 +1254,7 @@ async function saveCuts(): Promise<void> {
     await db.putWord(word);
     saved.add(cut);
   }
-  if (videoId && saved.size) await db.putVideo(videoId, c.file);
+  if (videoId && saved.size) await db.putVideo(videoId, c.video);
 
   c.cuts = c.cuts.filter((cut) => !saved.has(cut));
   await loadClips();
@@ -1185,7 +1337,8 @@ function creditLine(clip: Clip): string {
 
 /** Stop button, Escape and Space all end up here. */
 function stop(save: boolean): void {
-  if (importing) importing.cancelled = true;
+  if (screen?.capture) void stopScreen();
+  else if (importing) importing.cancelled = true;
   else void finish(save);
 }
 
@@ -1603,7 +1756,7 @@ function updateControls(): void {
   ui.caption.hidden = !reading || !stream || Boolean(importing);
   ui.speak.hidden = ui.motion.hidden = !speaking;
   ui.bulk.hidden = settings.mode !== 'record';
-  ui.pickSamples.disabled = ui.pickCut.disabled = !(tracker && idle);
+  ui.pickSamples.disabled = ui.pickCut.disabled = !(tracker && idle) || Boolean(screen);
   ui.cutter.hidden = !cutter || settings.mode !== 'record';
   ui.viewport.classList.toggle('speaking', speaking);
   ui.viewport.classList.toggle('with-camera', stream !== null);
@@ -1616,7 +1769,19 @@ function updateControls(): void {
   ui.pickFile.hidden = speaking;
   ui.stopRec.hidden = !busy;
   ui.recordRef.hidden = ui.recordTry.hidden = busy || reading || speaking;
-  ui.stopRec.textContent = importing ? '読み込みをやめる' : phase === 'countdown' ? 'やめる' : '停止';
+  ui.stopRec.textContent = screen?.capture
+    ? '取り込みを終える'
+    : importing
+      ? '読み込みをやめる'
+      : phase === 'countdown'
+        ? 'やめる'
+        : '停止';
+  const sharing = screen?.purpose === 'read';
+  ui.shareScreen.hidden = !reading || !screenSupported();
+  ui.shareScreen.textContent = sharing ? '画面共有をやめる' : '画面共有を読み取る';
+  ui.shareScreen.disabled = !tracker || (!sharing && (!idle || !templates.length));
+  ui.pickScreenCut.hidden = !screenSupported();
+  ui.pickScreenCut.disabled = !(tracker && idle) || Boolean(screen);
 
   if (speaking) {
     const vocabulary = new Set(templates.map((t) => t.word.id)).size;
@@ -1636,9 +1801,11 @@ function updateControls(): void {
       ? '読み取れる単語がまだありません。記録モードで単語の見本を撮ってください。'
       : !tracker
         ? 'モデルの読み込みが終わると読み取れます。'
-        : !stream
-          ? `登録した${vocabulary}語（見本${samples}件）から読み取ります。「カメラを使う」を押すか、動画に字幕を付けてください。`
-          : `登録した${vocabulary}語（見本${samples}件）から読み取ります。1語ずつ手話をして、手を止めるか下ろすと字幕になります。`;
+        : sharing
+          ? `登録した${vocabulary}語（見本${samples}件）から、共有した画面の手話を読み取っています。`
+          : !stream
+            ? `登録した${vocabulary}語（見本${samples}件）から読み取ります。「カメラを使う」か「画面共有を読み取る」を押すか、動画に字幕を付けてください。`
+            : `登録した${vocabulary}語（見本${samples}件）から読み取ります。1語ずつ手話をして、手を止めるか下ろすと字幕になります。`;
     return;
   }
 
@@ -2174,7 +2341,7 @@ function bindSettings(): void {
     player.flip = settings.mirrorView;
     if (!player.playing) player.redraw();
     saveSettings();
-    ui.viewport.classList.toggle('mirrored', settings.mirrorView);
+    ui.viewport.classList.toggle('mirrored', settings.mirrorView && !screen);
     drawDuet();
   };
   ui.viewport.classList.toggle('mirrored', settings.mirrorView);
@@ -2232,6 +2399,14 @@ function bindEvents(): void {
   ui.addStarter.onclick = () => void addStarterVocabulary();
   ui.pickSamples.onclick = () => void pickVideosFrom(ui.samplesInput, 'まとめて読み込む動画の出典（すべての動画に付きます）');
   ui.pickCut.onclick = () => void pickVideosFrom(ui.cutInput, '切り出す動画の出典');
+  ui.pickScreenCut.onclick = async () => {
+    const origin = await askOrigin(settings.lastOrigin, '共有して取り込む動画の出典');
+    if (!origin) return;
+    settings.lastOrigin = origin;
+    saveSettings();
+    await startScreen('cut', origin);
+  };
+  ui.shareScreen.onclick = () => void (screen ? stopScreen() : startScreen('read'));
   ui.cutterOriginEdit.onclick = async () => {
     if (!cutter) return;
     const origin = await askOrigin(cutter.origin, '切り出す動画の出典');

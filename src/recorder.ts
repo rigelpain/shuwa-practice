@@ -12,15 +12,25 @@ export class ClipRecorder {
   private readonly startedAt = performance.now();
   private readonly media: MediaRecorder | null = null;
   private readonly chunks: Blob[] = [];
+  /** Settles with the recording once the recorder stops, however it was stopped. */
+  private readonly recorded: Promise<Blob | null>;
 
   constructor(stream: MediaStream | null) {
-    if (!stream || typeof MediaRecorder === 'undefined') return;
+    if (!stream || typeof MediaRecorder === 'undefined') {
+      this.recorded = Promise.resolve(null);
+      return;
+    }
     const mimeType = pickVideoType();
-    this.media = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    this.media.ondataavailable = (e) => {
+    const media = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    media.ondataavailable = (e) => {
       if (e.data.size > 0) this.chunks.push(e.data);
     };
-    this.media.start();
+    // A shared screen can end on its own (the browser's "stop sharing"), which stops the recorder first.
+    this.recorded = new Promise((resolve) => {
+      media.onstop = () => resolve(new Blob(this.chunks, { type: media.mimeType }));
+    });
+    media.start();
+    this.media = media;
   }
 
   get elapsedMs(): number {
@@ -34,12 +44,8 @@ export class ClipRecorder {
 
   /** Stops the video recording and returns it, or null when there was no stream. */
   stop(): Promise<Blob | null> {
-    const media = this.media;
-    if (!media || media.state === 'inactive') return Promise.resolve(null);
-    return new Promise((resolve) => {
-      media.onstop = () => resolve(new Blob(this.chunks, { type: media.mimeType }));
-      media.stop();
-    });
+    if (this.media && this.media.state !== 'inactive') this.media.stop();
+    return this.recorded;
   }
 }
 

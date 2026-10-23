@@ -18,6 +18,15 @@ const ASSETS = `${import.meta.env.BASE_URL}mediapipe`;
 type Delegate = 'GPU' | 'CPU';
 type WasmFileset = Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>;
 
+/**
+ * What can be tracked: a playing video element, or a single frame taken
+ * straight from a stream (which keeps arriving while the tab is hidden).
+ */
+export type FrameSource = HTMLVideoElement | VideoFrame;
+
+const sizeOf = (s: FrameSource): [number, number] =>
+  s instanceof HTMLVideoElement ? [s.videoWidth, s.videoHeight] : [s.displayWidth, s.displayHeight];
+
 /** Size of the square the face crop is scaled to. */
 const FACE_CROP = 256;
 
@@ -173,7 +182,7 @@ export class Tracker {
    * rate stays up; the other one's last reading is reused. Pass `full` to run
    * every model on every frame, as when reading a video file.
    */
-  detect(source: HTMLVideoElement, full = false): FrameData {
+  detect(source: FrameSource, full = false): FrameData {
     // MediaPipe needs strictly increasing timestamps, even across source changes.
     const timestamp = Math.max(performance.now(), this.lastTimestamp + 1);
     this.lastTimestamp = timestamp;
@@ -212,9 +221,8 @@ export class Tracker {
    * a signer filmed from the waist up is too small. When the pose shows where
    * the head is, hand the face model a square crop around it instead.
    */
-  private faceCrop(source: HTMLVideoElement, pose: NormalizedLandmark[] | null): HTMLVideoElement | HTMLCanvasElement {
-    const W = source.videoWidth;
-    const H = source.videoHeight;
+  private faceCrop(source: FrameSource, pose: NormalizedLandmark[] | null): FrameSource | HTMLCanvasElement {
+    const [W, H] = sizeOf(source);
     const nose = pose?.[POSE.nose];
     this.lastCrop = null;
     if (!pose || !nose || (nose.visibility ?? 0) < 0.5 || !W || !H) return source;

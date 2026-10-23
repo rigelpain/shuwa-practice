@@ -67,6 +67,7 @@
           <button type="button" class="primary" id="recordTry">練習する</button>
           <button type="button" class="stop" id="stopRec" hidden>停止</button>
           <button type="button" class="quiet" id="pickFile">動画ファイルから読み込む</button>
+          <button type="button" class="quiet" id="shareScreen" hidden>画面共有を読み取る</button>
           <input type="file" id="fileInput" accept="video/*" hidden />
         </div>
         <p class="controls-hint" id="controlsHint"></p>
@@ -176,6 +177,8 @@
           <input type="file" id="samplesInput" accept="video/*" multiple hidden />
           <button type="button" class="quiet" id="pickCut">長い動画から切り出す</button>
           <span class="starter-note">手話の区切りを自動で見つけ、1つずつ単語名を付けて見本にします。</span>
+          <button type="button" class="quiet" id="pickScreenCut">画面共有から切り出す</button>
+          <span class="starter-note">YouTube などを開いたタブを共有して再生すると、ファイルを保存せずに切り出せます。</span>
           <input type="file" id="cutInput" accept="video/*" hidden />
         </div>
         <div class="starter" id="starter">
