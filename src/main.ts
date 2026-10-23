@@ -1,14 +1,17 @@
 import './style.css';
 import { drawFigure, drawOverlay, drawTimeline, fitCanvas, fitView, type Backdrop, type FigureView } from './draw';
 import { bodyFrame, type BodyFrame } from './features';
+import { ACCEPT_SCORE, recognize, Segmenter, segmentClip, type Recognition, type Segment, type Template } from './reader';
 import { ClipRecorder, trimToHands } from './recorder';
 import { compareClips, type CompareResult, type Hint } from './scoring';
 import * as db from './storage';
 import { Tracker, type LoadEvent, type LoadStep } from './tracker';
-import type { Clip, Frame, Word } from './types';
+import { clipKind, type Clip, type ClipKind, type Frame, type FrameData, type Word } from './types';
 
-type Kind = 'reference' | 'practice';
-type Phase = 'idle' | 'countdown' | 'recording' | 'saving';
+type Kind = ClipKind;
+type Mode = 'record' | 'read';
+/** 'reading' is a video file being captioned. */
+type Phase = 'idle' | 'countdown' | 'recording' | 'saving' | 'reading';
 
 /** Clips with fewer frames than this after trimming are not saved. */
 const MIN_FRAMES = 8;
@@ -40,6 +43,18 @@ const ui = {
   startCamera: $<HTMLButtonElement>('startCamera'),
   countdown: $('countdown'),
   recBadge: $('recBadge'),
+  recLabel: $('recLabel'),
+  modeRecord: $<HTMLButtonElement>('modeRecord'),
+  modeRead: $<HTMLButtonElement>('modeRead'),
+  modeNote: $('modeNote'),
+  caption: $('caption'),
+  transcript: $('transcript'),
+  transcriptList: $('transcriptList'),
+  transcriptEmpty: $('transcriptEmpty'),
+  copyTranscript: $<HTMLButtonElement>('copyTranscript'),
+  clearTranscript: $<HTMLButtonElement>('clearTranscript'),
+  exportPractice: $<HTMLInputElement>('exportPractice'),
+  exportVideos: $<HTMLInputElement>('exportVideos'),
   recTime: $('recTime'),
   recordRef: $<HTMLButtonElement>('recordRef'),
   recordTry: $<HTMLButtonElement>('recordTry'),
@@ -98,6 +113,10 @@ function el<K extends keyof HTMLElementTagNameMap>(
 const fmtDate = (t: number) =>
   new Date(t).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const fmtSec = (ms: number) => `${(ms / 1000).toFixed(1)}秒`;
+const fmtClock = (ms: number) => {
+  const sec = Math.floor(ms / 1000);
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+};
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 // ---------------------------------------------------------------- settings
@@ -114,6 +133,7 @@ interface Settings {
   /** Camera view: show the camera image, and the tracked bones over it. */
   showVideo: boolean;
   showBones: boolean;
+  mode: Mode;
 }
 
 const settings: Settings = (() => {
@@ -127,6 +147,7 @@ const settings: Settings = (() => {
     mirrorView: true,
     showVideo: true,
     showBones: true,
+    mode: 'record',
   };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') };
@@ -339,6 +360,12 @@ function loop(): void {
     recorder.push(data);
     ui.recTime.textContent = (recorder.elapsedMs / 1000).toFixed(1);
   }
+  if (settings.mode === 'read' && phase === 'idle' && !importing) {
+    live ??= { segmenter: new Segmenter(v.videoWidth / v.videoHeight), startedAt: performance.now() };
+    const sign = live.segmenter.push(data, performance.now() - live.startedAt);
+    showPending(live.segmenter.active);
+    if (sign) readSign(sign, `カメラ ${fmtClock(sign.startMs)}`);
+  }
 }
 
 function sizeOverlay(): void {
@@ -375,6 +402,7 @@ async function startCamera(): Promise<void> {
 
 function attachCamera(): void {
   const v = ui.video;
+  live = null;
   v.removeAttribute('src');
   v.srcObject = stream;
   v.playbackRate = 1;
@@ -414,6 +442,7 @@ function countdown(seconds: number): Promise<boolean> {
 
 function beginRecording(kind: Kind, source: MediaStream | null): void {
   recordKind = kind;
+  ui.recLabel.textContent = '記録中';
   recorder = new ClipRecorder(source);
   phase = 'recording';
   ui.recTime.textContent = '0.0';
@@ -481,19 +510,27 @@ async function saveClip(frames: Frame[], video: Blob | null, kind: Kind): Promis
     height: ui.video.videoHeight,
     durationMs: kept[kept.length - 1].t,
     frames: kept,
+    kind,
   };
   await db.putClip(clip);
   if (video && video.size > 0) await db.putVideo(clip.id, video);
-  if (kind === 'reference') {
+  const becomesReference = kind === 'sample' && !word.referenceId;
+  if (becomesReference) {
     word.referenceId = clip.id;
     await db.putWord(word);
   }
   await loadClips();
+  await loadTemplates();
   renderWords();
   renderDetail();
-  if (kind === 'reference') {
+  if (kind === 'sample') {
     hideResult();
-    say(`「${word.label}」のお手本を保存しました。「練習する」で比べられます。`);
+    const count = clips.filter((c) => clipKind(c, word) === 'sample').length;
+    say(
+      becomesReference
+        ? `「${word.label}」の見本を保存しました。これがお手本になります。見本をもう何回か撮ると、読み取りが安定します。`
+        : `「${word.label}」の見本を保存しました（${count}件目）。読み取りモードで使われます。`,
+    );
     await showVideo(clip);
   } else {
     say('練習を保存しました。');
@@ -515,14 +552,8 @@ async function knownDuration(v: HTMLVideoElement): Promise<number> {
   return Number.isFinite(v.duration) ? v.duration : v.currentTime;
 }
 
-/**
- * Reads a video file frame by frame. Seeking instead of playing means every
- * frame is tracked no matter how fast the machine is or whether the tab is visible.
- */
-async function importFile(file: File): Promise<void> {
-  if (!selectedWord() || !tracker || phase !== 'idle') return;
-  // A word without a reference takes the video as its reference.
-  const kind: Kind = referenceClip() ? 'practice' : 'reference';
+/** Points the video element at a file and waits until it can be read; returns its length in seconds. */
+async function openVideoFile(file: File): Promise<number> {
   const v = ui.video;
   const url = URL.createObjectURL(file);
   importing = { file, url, cancelled: false };
@@ -530,26 +561,43 @@ async function importFile(file: File): Promise<void> {
   v.preload = 'auto';
   v.src = url;
   ui.viewportEmpty.hidden = true;
+  await new Promise<void>((resolve, reject) => {
+    v.onloadeddata = () => resolve();
+    v.onerror = () => reject(new Error('このブラウザでは再生できない動画です'));
+  });
+  return knownDuration(v);
+}
+
+/**
+ * Tracks every frame of the open file in turn. Seeking instead of playing means
+ * no frame is skipped, however slow the machine or hidden the tab.
+ */
+async function scanVideo(duration: number, onFrame: (data: FrameData, t: number) => void): Promise<void> {
+  const v = ui.video;
+  for (let t = 0; t <= duration && !importing?.cancelled; t += 1 / SCAN_FPS) {
+    await seek(v, t);
+    const data = tracker!.detect(v, true);
+    drawOverlay(overlayCtx, data, cameraView());
+    onFrame(data, t * 1000);
+    ui.recTime.textContent = `${t.toFixed(1)} / ${duration.toFixed(1)}`;
+  }
+}
+
+/** Record mode: saves a video file as a sample (or as practice once the word has a reference). */
+async function importFile(file: File): Promise<void> {
+  if (!selectedWord() || !tracker || phase !== 'idle') return;
+  const kind: Kind = referenceClip() ? 'practice' : 'sample';
   try {
-    await new Promise<void>((resolve, reject) => {
-      v.onloadeddata = () => resolve();
-      v.onerror = () => reject(new Error('このブラウザでは再生できない動画です'));
-    });
-    const duration = await knownDuration(v);
+    const duration = await openVideoFile(file);
     beginRecording(kind, null);
+    ui.recLabel.textContent = '読み取り中';
     say(
-      kind === 'reference'
-        ? '動画を読み取っています。終わるとお手本として保存します。'
+      kind === 'sample'
+        ? '動画を読み取っています。終わると見本として保存し、お手本にします。'
         : '動画を読み取っています。終わると練習として保存し、お手本と比べます。',
     );
-    for (let t = 0; t <= duration && !importing.cancelled; t += 1 / SCAN_FPS) {
-      await seek(v, t);
-      const data = tracker.detect(v, true);
-      drawOverlay(overlayCtx, data, cameraView());
-      recorder?.push(data, t * 1000);
-      ui.recTime.textContent = `${t.toFixed(1)} / ${duration.toFixed(1)}`;
-    }
-    await finish(!importing.cancelled);
+    await scanVideo(duration, (data, t) => recorder?.push(data, t));
+    await finish(!importing?.cancelled);
   } catch (err) {
     recorder = null;
     phase = 'idle';
@@ -557,6 +605,36 @@ async function importFile(file: File): Promise<void> {
     endImport();
     updateControls();
     say(`動画を読み込めませんでした（${errorText(err)}）。`, 'error');
+  }
+}
+
+/** Read mode: captions every sign in a video file, with its time in the video. */
+async function captionFile(file: File): Promise<void> {
+  if (!tracker || phase !== 'idle' || !templates.length) return;
+  let found = 0;
+  try {
+    const duration = await openVideoFile(file);
+    phase = 'reading';
+    ui.recLabel.textContent = '字幕を付けています';
+    ui.recBadge.hidden = false;
+    updateControls();
+    say(`「${file.name}」の手話を読み取っています。`);
+    const segmenter = new Segmenter(ui.video.videoWidth / ui.video.videoHeight);
+    const read = (sign: Segment | null) => {
+      if (!sign) return;
+      found++;
+      readSign(sign, `${file.name} ${fmtClock(sign.startMs)}`);
+    };
+    await scanVideo(duration, (data, t) => read(segmenter.push(data, t)));
+    read(segmenter.flush());
+    say(importing?.cancelled ? '字幕付けをやめました。' : `「${file.name}」から${found}語を読み取りました。`);
+  } catch (err) {
+    say(`動画を読み込めませんでした（${errorText(err)}）。`, 'error');
+  } finally {
+    ui.recBadge.hidden = true;
+    endImport();
+    phase = 'idle';
+    updateControls();
   }
 }
 
@@ -603,6 +681,7 @@ async function removeWord(word: Word): Promise<void> {
   if (!confirm(`「${word.label}」と、その記録をすべて削除します。元に戻せません。`)) return;
   await db.deleteWord(word.id);
   words = words.filter((w) => w.id !== word.id);
+  await loadTemplates();
   selectedId = null;
   clips = [];
   hideResult();
@@ -624,12 +703,24 @@ async function removeClip(clip: Clip): Promise<void> {
     word.referenceId = null;
     await db.putWord(word);
   }
+  await loadTemplates();
   if (shown && (shown.attempt.id === clip.id || shown.ref.id === clip.id)) hideResult();
   await loadClips();
   renderWords();
   renderDetail();
   updateControls();
   if (viewerClipId === clip.id) await showVideo(referenceClip());
+}
+
+async function makeSample(clip: Clip): Promise<void> {
+  const word = selectedWord();
+  if (!word) return;
+  clip.kind = 'sample';
+  await db.putClip(clip);
+  if (shown?.attempt.id === clip.id) hideResult();
+  await loadTemplates();
+  renderDetail();
+  say('見本にしました。読み取りモードで使われます。');
 }
 
 async function makeReference(clip: Clip): Promise<void> {
@@ -642,7 +733,7 @@ async function makeReference(clip: Clip): Promise<void> {
   renderDetail();
   updateControls();
   await showVideo(clip);
-  say('お手本を差し替えました。ほかの記録の点数は、このお手本と比べた値に変わります。');
+  say('お手本を差し替えました。練習の点数は、このお手本と比べた値に変わります。');
 }
 
 // ---------------------------------------------------------------- rendering
@@ -730,16 +821,20 @@ function clipTable(ref: Clip | null): HTMLTableElement {
     {},
     el('th', { textContent: '撮影日時' }),
     el('th', { textContent: '長さ', className: 'num' }),
-    el('th', { textContent: '点数', className: 'num' }),
+    el('th', { textContent: '種類・点数', className: 'num' }),
     el('th', {}, el('span', { className: 'visually-hidden', textContent: '操作' })),
   );
+  const word = selectedWord();
   const rows = clips.map((clip) => {
     const isRef = clip.id === ref?.id;
+    const isSample = clipKind(clip, word) === 'sample';
     const scoreCell = isRef
       ? el('span', { className: 'tag', textContent: 'お手本' })
-      : ref
-        ? String(Math.round(comparison(ref, clip).score))
-        : '—';
+      : isSample
+        ? el('span', { className: 'tag quiet-tag', textContent: '見本' })
+        : ref
+          ? String(Math.round(comparison(ref, clip).score))
+          : '—';
     const button = (label: string, onclick: () => void, extra = '') =>
       el('button', { type: 'button', className: `quiet ${extra}`.trim(), textContent: label, onclick });
     return el(
@@ -751,9 +846,10 @@ function clipTable(ref: Clip | null): HTMLTableElement {
       el(
         'td',
         { className: 'actions' },
-        !isRef && ref ? button('結果', () => showResult(clip.id)) : null,
+        !isSample && ref ? button('結果', () => showResult(clip.id)) : null,
         button('動画', () => void showVideo(clip)),
-        isRef ? null : button('お手本にする', () => void makeReference(clip)),
+        isSample ? null : button('見本にする', () => void makeSample(clip)),
+        isSample && !isRef ? button('お手本にする', () => void makeReference(clip)) : null,
         button('削除', () => void removeClip(clip), 'danger'),
       ),
     );
@@ -765,15 +861,39 @@ function updateControls(): void {
   const word = selectedWord();
   const ref = referenceClip();
   const idle = phase === 'idle';
+  const reading = settings.mode === 'read';
   const canShoot = tracker !== null && stream !== null && !importing && word !== null && idle;
-  const busy = phase === 'countdown' || phase === 'recording';
+  const busy = phase === 'countdown' || phase === 'recording' || phase === 'reading';
+
+  ui.modeRecord.setAttribute('aria-pressed', String(!reading));
+  ui.modeRead.setAttribute('aria-pressed', String(reading));
+  ui.modeRecord.disabled = ui.modeRead.disabled = !idle;
+  ui.modeNote.textContent = reading
+    ? '手話をすると、登録した単語から一番近いものを字幕に出します。'
+    : '単語ごとに見本を登録し、お手本と比べて練習します。';
+  ui.transcript.hidden = !reading;
+  ui.caption.hidden = !reading || !stream || Boolean(importing);
 
   ui.recordRef.disabled = !canShoot;
   ui.recordTry.disabled = !canShoot || !ref;
-  ui.pickFile.disabled = !(tracker && word && idle);
+  ui.pickFile.textContent = reading ? '動画に字幕を付ける' : '動画ファイルから読み込む';
+  ui.pickFile.disabled = !(tracker && idle && (reading ? templates.length : word));
   ui.stopRec.hidden = !busy;
-  ui.recordRef.hidden = ui.recordTry.hidden = busy;
+  ui.recordRef.hidden = ui.recordTry.hidden = busy || reading;
   ui.stopRec.textContent = importing ? '読み込みをやめる' : phase === 'countdown' ? 'やめる' : '停止';
+
+  if (reading) {
+    const samples = templates.length;
+    const vocabulary = new Set(templates.map((t) => t.word.id)).size;
+    ui.controlsHint.textContent = !samples
+      ? '読み取れる単語がまだありません。記録モードで単語の見本を撮ってください。'
+      : !tracker
+        ? 'モデルの読み込みが終わると読み取れます。'
+        : !stream
+          ? `登録した${vocabulary}語（見本${samples}件）から読み取ります。「カメラを使う」を押すか、動画に字幕を付けてください。`
+          : `登録した${vocabulary}語（見本${samples}件）から読み取ります。1語ずつ手話をして、手を止めるか下ろすと字幕になります。`;
+    return;
+  }
 
   ui.controlsHint.textContent = !word
     ? '右の欄で単語を選ぶか、新しく追加してください。'
@@ -782,8 +902,126 @@ function updateControls(): void {
       : !stream
         ? '「カメラを使う」を押すと撮影できます。手話の動画ファイルからも読み込めます。'
         : !ref
-          ? `まず「${word.label}」のお手本を撮ってください。`
+          ? `まず「${word.label}」の見本を撮ってください。最初の見本がお手本になります。`
           : '手を下ろした状態から始めて、終わったら手を下ろしてください。スペースキーでも練習を始められます。';
+}
+
+// ---------------------------------------------------------------- read mode
+
+/** How many recent words the caption line keeps, and how long it stays after the last one. */
+const CAPTION_WORDS = 4;
+const CAPTION_CLEAR_MS = 8000;
+
+interface Caption {
+  /** Where the sign came from: the camera or a file, and when. */
+  where: string;
+  rec: Recognition;
+}
+
+/** Every sample of every word: what signing is read against. */
+let templates: Template[] = [];
+let live: { segmenter: Segmenter; startedAt: number } | null = null;
+let transcript: Caption[] = [];
+let captionWords: string[] = [];
+let captionTimer = 0;
+let pending = false;
+
+async function loadTemplates(): Promise<void> {
+  const byId = new Map(words.map((w) => [w.id, w]));
+  templates = (await db.listAllClips()).flatMap((clip) => {
+    const word = byId.get(clip.wordId);
+    return word && clipKind(clip, word) === 'sample' ? [{ word, clip }] : [];
+  });
+  updateControls();
+}
+
+function setMode(mode: Mode): void {
+  if (phase !== 'idle') return;
+  settings.mode = mode;
+  saveSettings();
+  live = null;
+  showPending(false);
+  if (mode === 'read') hideResult();
+  updateControls();
+}
+
+function readSign(sign: Segment, where: string): void {
+  const clip = segmentClip(sign, ui.video.videoWidth, ui.video.videoHeight);
+  const rec = recognize(clip, templates, { mirror: settings.mirrorCompare, useFace: settings.useFace });
+  transcript.push({ where, rec });
+  renderTranscript();
+  showCaption(rec);
+}
+
+function showCaption(rec: Recognition): void {
+  captionWords = [...captionWords, rec.word ? rec.word.label : '？'].slice(-CAPTION_WORDS);
+  renderCaption();
+  clearTimeout(captionTimer);
+  captionTimer = window.setTimeout(() => {
+    captionWords = [];
+    renderCaption();
+  }, CAPTION_CLEAR_MS);
+}
+
+/** Shows "…" on the caption line while a sign is being collected. */
+function showPending(on: boolean): void {
+  if (on === pending) return;
+  pending = on;
+  renderCaption();
+}
+
+function renderCaption(): void {
+  const spans = captionWords.map((w, i) =>
+    el('span', { className: i === captionWords.length - 1 ? 'latest' : '', textContent: w }),
+  );
+  if (pending) spans.push(el('span', { className: 'pending', textContent: '…' }));
+  ui.caption.replaceChildren(...spans);
+  ui.caption.classList.toggle('is-empty', !captionWords.length && !pending);
+}
+
+function candidatesText(rec: Recognition): string {
+  const [top, ...rest] = rec.candidates;
+  if (!top) return '';
+  const list = (cs: typeof rec.candidates) => cs.map((c) => `${c.word.label} ${Math.round(c.score)}点`).join('、');
+  if (!rec.word) return `いちばん近いのは${list([top])}でした（${ACCEPT_SCORE}点未満）`;
+  return rest.length ? `${Math.round(top.score)}点　ほかの候補は${list(rest)}` : `${Math.round(top.score)}点`;
+}
+
+function renderTranscript(): void {
+  ui.transcriptEmpty.hidden = transcript.length > 0;
+  ui.transcriptList.replaceChildren(
+    ...transcript.map(({ where, rec }) =>
+      el(
+        'li',
+        { className: rec.word ? '' : 'is-unknown' },
+        el('span', { className: 'said', textContent: rec.word ? rec.word.label : '読み取れませんでした' }),
+        el('span', { className: 'why', textContent: candidatesText(rec) }),
+        el('span', { className: 'when', textContent: where }),
+      ),
+    ),
+  );
+  ui.transcriptList.scrollTop = ui.transcriptList.scrollHeight;
+}
+
+function clearTranscript(): void {
+  transcript = [];
+  captionWords = [];
+  renderTranscript();
+  renderCaption();
+}
+
+async function copyTranscript(): Promise<void> {
+  const text = transcript.flatMap(({ rec }) => (rec.word ? [rec.word.label] : [])).join(' ');
+  if (!text) {
+    say('コピーできる字幕がまだありません。');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    say('字幕をコピーしました。');
+  } catch {
+    say('字幕をコピーできませんでした。ブラウザがクリップボードへの書き込みを許可していません。', 'error');
+  }
 }
 
 // ---------------------------------------------------------------- result
@@ -944,9 +1182,10 @@ function tickDuet(now: number): void {
 // ---------------------------------------------------------------- data files
 
 async function exportAll(): Promise<void> {
-  const data = await db.exportData();
+  const opts = { practice: ui.exportPractice.checked, videos: ui.exportVideos.checked };
+  const data = await db.exportData(opts);
   if (!data.clips.length) {
-    say('書き出す記録がまだありません。');
+    say('書き出す見本がまだありません。');
     return;
   }
   // Four decimals keep landmark precision while roughly halving the file.
@@ -956,7 +1195,12 @@ async function exportAll(): Promise<void> {
   const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
   el('a', { href: url, download: `shuwa-practice-${new Date().toISOString().slice(0, 10)}.json` }).click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  say(`${data.words.length}語、${data.clips.length}件の記録を書き出しました。動画は含まれません。`);
+  const samples = data.clips.filter((c) => c.kind === 'sample').length;
+  const practice = data.clips.length - samples;
+  say(
+    `${data.words.length}語、見本${samples}件${opts.practice ? `、練習${practice}件` : ''}を書き出しました` +
+      (opts.videos ? '（動画つき）。' : '（動画なし）。'),
+  );
 }
 
 async function importAll(file: File): Promise<void> {
@@ -965,17 +1209,18 @@ async function importAll(file: File): Promise<void> {
     if (data.format !== 'shuwa-practice' || !Array.isArray(data.words) || !Array.isArray(data.clips)) {
       throw new Error('このツールで書き出したファイルではありません');
     }
-    await db.importData(data);
+    const added = await db.importData(data);
     words = await db.listWords();
     comparisons.clear();
     selectedId ??= words[0]?.id ?? null;
     await loadClips();
+    await loadTemplates();
     renderWords();
     renderDetail();
     updateControls();
-    say(`${data.words.length}語、${data.clips.length}件の記録を読み込みました。`);
+    say(`${added.words}語、${added.clips}件の記録を読み込みました。同じ名前の単語は1つにまとめています。`);
   } catch (err) {
-    say(`読み込めませんでした（${errorText(err)}）。このツールで書き出したJSONファイルを選んでください。`, 'error');
+    say(`読み込めませんでした（${errorText(err)}）。このツールで書き出した単語帳（JSON）を選んでください。`, 'error');
   }
 }
 
@@ -1058,15 +1303,19 @@ function bindEvents(): void {
   ui.video.addEventListener('loadedmetadata', sizeOverlay);
   ui.video.addEventListener('resize', sizeOverlay);
   ui.startCamera.onclick = () => void startCamera();
-  ui.recordRef.onclick = () => void record('reference');
+  ui.recordRef.onclick = () => void record('sample');
   ui.recordTry.onclick = () => void record('practice');
   ui.stopRec.onclick = () => stop(true);
   ui.pickFile.onclick = () => ui.fileInput.click();
   ui.fileInput.onchange = () => {
     const file = ui.fileInput.files?.[0];
     ui.fileInput.value = '';
-    if (file) void importFile(file);
+    if (file) void (settings.mode === 'read' ? captionFile(file) : importFile(file));
   };
+  ui.modeRecord.onclick = () => setMode('record');
+  ui.modeRead.onclick = () => setMode('read');
+  ui.clearTranscript.onclick = clearTranscript;
+  ui.copyTranscript.onclick = () => void copyTranscript();
 
   ui.addWord.onsubmit = (e) => {
     e.preventDefault();
@@ -1106,6 +1355,7 @@ function bindEvents(): void {
       return;
     }
     if (e.code !== 'Space' || (e.target as HTMLElement).closest('input, select, textarea, button, summary, video')) return;
+    if (settings.mode === 'read') return;
     e.preventDefault();
     if (phase === 'idle') void record('practice');
     else stop(true);
@@ -1124,7 +1374,8 @@ async function init(): Promise<void> {
   }
   if (words[0]) await selectWord(words[0].id);
   else renderWords();
-  updateControls();
+  await loadTemplates();
+  setMode(settings.mode);
 
   startLoading(Tracker.steps(settings.recordFace));
   try {

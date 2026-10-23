@@ -234,6 +234,34 @@ input[type='checkbox'] {
 
 /* Camera */
 
+.modes {
+  display: inline-flex;
+  padding: 3px;
+  margin-bottom: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+}
+
+.modes button {
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 18px;
+  background: transparent;
+  color: var(--ink-soft);
+}
+
+.modes button[aria-pressed='true'] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.mode-note {
+  margin-bottom: 12px;
+  font-size: 0.875rem;
+  color: var(--ink-soft);
+}
+
 .viewport {
   position: relative;
   aspect-ratio: 16 / 9;
@@ -362,6 +390,39 @@ input[type='checkbox'] {
   text-shadow: 0 0 4px rgb(0 0 0 / 0.6);
 }
 
+/* Live captions sit where subtitles would: low and centred, never mirrored. */
+.caption {
+  position: absolute;
+  left: 50%;
+  bottom: 8%;
+  transform: translateX(-50%);
+  max-width: 92%;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0 0.5em;
+  padding: 6px 18px;
+  border-radius: 6px;
+  background: rgb(10 16 30 / 0.72);
+  color: rgb(255 255 255 / 0.7);
+  font-size: clamp(1.25rem, 3.6vw, 2.25rem);
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.caption.is-empty {
+  display: none;
+}
+
+.caption .latest {
+  color: #ffffff;
+}
+
+.caption .pending {
+  color: rgb(255 255 255 / 0.55);
+  letter-spacing: 0.1em;
+}
+
 .rec-badge {
   position: absolute;
   top: 12px;
@@ -395,6 +456,67 @@ input[type='checkbox'] {
 
 .notice.error {
   color: var(--heat-high);
+}
+
+.transcript {
+  margin-top: 20px;
+}
+
+.transcript-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.transcript-head h2 {
+  font-size: 1.125rem;
+  font-weight: 700;
+  margin-right: auto;
+}
+
+.transcript-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+
+.transcript-list li {
+  display: grid;
+  grid-template-columns: minmax(6em, auto) 1fr;
+  grid-template-areas: 'said why' 'said when';
+  column-gap: 16px;
+  align-items: baseline;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.transcript-list .said {
+  grid-area: said;
+  font-size: 1.375rem;
+  font-weight: 700;
+}
+
+.transcript-list .why {
+  grid-area: why;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.transcript-list .when {
+  grid-area: when;
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.transcript-list li.is-unknown .said {
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--ink-soft);
 }
 
 .settings {
@@ -565,13 +687,34 @@ input[type='checkbox'] {
   border: 1px solid var(--ink);
 }
 
+.tag.quiet-tag {
+  border-color: var(--line);
+  color: var(--ink-soft);
+}
+
 .data-io {
   margin-top: auto;
-  padding-top: 12px;
+  padding-top: 14px;
   border-top: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+}
+
+.data-io-note {
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+
+.data-io-actions {
   display: flex;
   flex-wrap: wrap;
+  gap: 8px;
+}
+
+.data-io-options {
+  display: grid;
   gap: 4px;
+  font-size: 0.875rem;
 }
 
 /* Result: the two figures and the strip of differences carry the page. */

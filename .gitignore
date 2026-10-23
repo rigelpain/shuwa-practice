@@ -30,8 +30,9 @@ CLAUDE.local.md
 AGENTS.md
 .mcp.json
 
-# Exported practice data (contains people's recorded movements)
+# Exported vocabulary books (contain people's recorded movements and videos)
 shuwa-practice-*.json
+shuwa-vocabulary-*.json
 
 # OS / editor
 .DS_Store

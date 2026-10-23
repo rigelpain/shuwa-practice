@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>手話れんしゅう帳</title>
-    <meta name="description" content="手話をカメラで記録し、お手本との動きの違いを点数とタイムラインで確かめる練習ツール" />
+    <meta name="description" content="登録した手話を字幕に変える読み取りと、お手本と比べる練習ができるブラウザツール" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -32,6 +32,11 @@
 
     <main class="layout">
       <section class="stage" aria-label="撮影">
+        <div class="modes" role="group" aria-label="モード">
+          <button type="button" id="modeRecord" aria-pressed="true">記録モード</button>
+          <button type="button" id="modeRead" aria-pressed="false">読み取りモード</button>
+        </div>
+        <p class="mode-note" id="modeNote"></p>
         <div class="viewport mirrored" id="viewport">
           <video id="video" playsinline muted></video>
           <canvas id="overlay"></canvas>
@@ -46,11 +51,12 @@
           </div>
           <p class="fps" id="fps" hidden></p>
           <div class="countdown" id="countdown" hidden></div>
-          <p class="rec-badge" id="recBadge" hidden>記録中 <span id="recTime">0.0</span>秒</p>
+          <p class="caption is-empty" id="caption" aria-live="polite" hidden></p>
+          <p class="rec-badge" id="recBadge" hidden><span id="recLabel">記録中</span> <span id="recTime">0.0</span>秒</p>
         </div>
 
         <div class="controls">
-          <button type="button" id="recordRef">お手本を撮る</button>
+          <button type="button" id="recordRef">見本を撮る</button>
           <button type="button" class="primary" id="recordTry">練習する</button>
           <button type="button" class="stop" id="stopRec" hidden>停止</button>
           <button type="button" class="quiet" id="pickFile">動画ファイルから読み込む</button>
@@ -58,6 +64,16 @@
         </div>
         <p class="controls-hint" id="controlsHint"></p>
         <p class="notice" id="notice" aria-live="polite"></p>
+
+        <section class="transcript" id="transcript" aria-labelledby="transcriptTitle" hidden>
+          <div class="transcript-head">
+            <h2 id="transcriptTitle">字幕</h2>
+            <button type="button" class="quiet" id="copyTranscript">字幕をコピー</button>
+            <button type="button" class="quiet" id="clearTranscript">消去</button>
+          </div>
+          <ol class="transcript-list" id="transcriptList"></ol>
+          <p class="empty-state" id="transcriptEmpty">読み取った単語がここに順に並びます。</p>
+        </section>
 
         <details class="settings">
           <summary>撮影と比較の設定</summary>
@@ -100,9 +116,18 @@
         <ul class="word-list" id="wordList"></ul>
         <div class="word-detail" id="wordDetail"></div>
         <div class="data-io">
-          <button type="button" class="quiet" id="exportData">記録を書き出す（JSON）</button>
-          <button type="button" class="quiet" id="importData">記録を読み込む</button>
-          <input type="file" id="importInput" accept="application/json,.json" hidden />
+          <p class="data-io-note">
+            単語帳には単語と見本が入ります。手話者が書き出したものを練習者が読み込むと、そのお手本で練習でき、その人の語彙で読み取れます。
+          </p>
+          <div class="data-io-actions">
+            <button type="button" id="exportData">単語帳を書き出す</button>
+            <button type="button" id="importData">単語帳を読み込む</button>
+            <input type="file" id="importInput" accept="application/json,.json" hidden />
+          </div>
+          <div class="data-io-options">
+            <label class="check"><input type="checkbox" id="exportPractice" /> 練習の記録も含める</label>
+            <label class="check"><input type="checkbox" id="exportVideos" /> 動画も含める（ファイルが大きくなります）</label>
+          </div>
         </div>
       </aside>
     </main>

@@ -50,9 +50,18 @@ export interface Frame {
 
 export type FrameData = Omit<Frame, 't'>;
 
+/**
+ * A sample is a signer showing the word: samples are what live signing is
+ * read against, and the word's reference is one of them. A practice is a
+ * learner's attempt, scored against the reference but never read against.
+ */
+export type ClipKind = 'sample' | 'practice';
+
 export interface Clip {
   id: string;
   wordId: string;
+  /** Missing in clips recorded before kinds existed; see clipKind(). */
+  kind?: ClipKind;
   /** Who signed it. Kept so training data can later be split by person. */
   signer: string;
   createdAt: number;
@@ -69,4 +78,9 @@ export interface Word {
   /** The clip practice attempts are compared against. */
   referenceId: string | null;
   createdAt: number;
+}
+
+/** Older clips have no kind: the word's reference counts as a sample, anything else as practice. */
+export function clipKind(clip: Clip, word: Word | null): ClipKind {
+  return clip.kind ?? (clip.id === word?.referenceId ? 'sample' : 'practice');
 }
