@@ -35,11 +35,16 @@
         <div class="modes" role="group" aria-label="モード">
           <button type="button" id="modeRecord" aria-pressed="true">記録モード</button>
           <button type="button" id="modeRead" aria-pressed="false">読み取りモード</button>
+          <button type="button" id="modeSpeak" aria-pressed="false">話して練習</button>
         </div>
         <p class="mode-note" id="modeNote"></p>
         <div class="viewport mirrored" id="viewport">
           <video id="video" playsinline muted></video>
-          <canvas id="overlay"></canvas>
+          <canvas id="overlay" class="overlay"></canvas>
+          <div class="motion" id="motion" hidden>
+            <canvas id="motionCanvas" aria-label="手話モーション"></canvas>
+            <p class="motion-word" id="motionWord"></p>
+          </div>
           <div class="viewport-empty" id="viewportEmpty">
             <p>カメラに上半身と両手が映るようにすると、手と体の動きを記録できます。</p>
             <button type="button" class="primary" id="startCamera">カメラを使う</button>
@@ -64,6 +69,28 @@
         </div>
         <p class="controls-hint" id="controlsHint"></p>
         <p class="notice" id="notice" aria-live="polite"></p>
+
+        <section class="speak" id="speak" aria-label="話して練習" hidden>
+          <div class="speak-input">
+            <button type="button" class="primary" id="micToggle">話す</button>
+            <form class="speak-form" id="sentenceForm">
+              <label class="visually-hidden" for="sentenceInput">手話にする文</label>
+              <input type="text" id="sentenceInput" placeholder="文を入力（例：おはよう、今日はいい天気）" autocomplete="off" />
+              <button type="submit">手話にする</button>
+            </form>
+          </div>
+          <p class="speak-live" id="speakLive" aria-live="polite"></p>
+          <p class="speak-sentence" id="speakSentence"></p>
+          <div class="transport">
+            <button type="button" id="motionReplay" disabled>もう一度再生</button>
+            <label class="check"><input type="checkbox" id="motionSlow" /> ゆっくり</label>
+            <button type="button" class="quiet" id="speakCamera">カメラも使う</button>
+          </div>
+          <p class="speak-note" id="micNote">
+            太字の言葉を手話にします。点線の言葉は単語帳にありますが、まだ見本がありません。マイクの音声はブラウザの音声認識で文字にします（Chrome では Google のサーバーに送られます）。
+          </p>
+          <ol class="speak-history" id="speakHistory" aria-label="話した文"></ol>
+        </section>
 
         <section class="transcript" id="transcript" aria-labelledby="transcriptTitle" hidden>
           <div class="transcript-head">

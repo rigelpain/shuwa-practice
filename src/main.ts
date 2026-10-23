@@ -2,15 +2,18 @@ import './style.css';
 import { drawFigure, drawOverlay, drawTimeline, fitCanvas, fitView, type Backdrop, type FigureView } from './draw';
 import { bodyFrame, type BodyFrame } from './features';
 import { ACCEPT_SCORE, recognize, Segmenter, segmentClip, type Recognition, type Segment, type Template } from './reader';
+import { MotionPlayer, type MotionItem } from './player';
 import { ClipRecorder, trimToHands } from './recorder';
 import { compareClips, type CompareResult, type Hint } from './scoring';
+import { toSigns, type Token } from './sentence';
+import { Listener, speechSupported } from './speech';
 import * as db from './storage';
 import { Tracker, type LoadEvent, type LoadStep } from './tracker';
 import { STARTER_VOCABULARY } from './vocabulary';
 import { clipKind, type Clip, type ClipKind, type Frame, type FrameData, type Word } from './types';
 
 type Kind = ClipKind;
-type Mode = 'record' | 'read';
+type Mode = 'record' | 'read' | 'speak';
 /** 'reading' is a video file being captioned. */
 type Phase = 'idle' | 'countdown' | 'recording' | 'saving' | 'reading';
 
@@ -47,6 +50,21 @@ const ui = {
   recLabel: $('recLabel'),
   modeRecord: $<HTMLButtonElement>('modeRecord'),
   modeRead: $<HTMLButtonElement>('modeRead'),
+  modeSpeak: $<HTMLButtonElement>('modeSpeak'),
+  speak: $('speak'),
+  micToggle: $<HTMLButtonElement>('micToggle'),
+  micNote: $('micNote'),
+  sentenceForm: $<HTMLFormElement>('sentenceForm'),
+  sentenceInput: $<HTMLInputElement>('sentenceInput'),
+  speakLive: $('speakLive'),
+  speakSentence: $('speakSentence'),
+  motionReplay: $<HTMLButtonElement>('motionReplay'),
+  motionSlow: $<HTMLInputElement>('motionSlow'),
+  speakCamera: $<HTMLButtonElement>('speakCamera'),
+  speakHistory: $('speakHistory'),
+  motion: $('motion'),
+  motionCanvas: $<HTMLCanvasElement>('motionCanvas'),
+  motionWord: $('motionWord'),
   modeNote: $('modeNote'),
   caption: $('caption'),
   transcript: $('transcript'),
@@ -935,25 +953,45 @@ function updateControls(): void {
   const ref = referenceClip();
   const idle = phase === 'idle';
   const reading = settings.mode === 'read';
+  const speaking = settings.mode === 'speak';
   const canShoot = tracker !== null && stream !== null && !importing && word !== null && idle;
   const busy = phase === 'countdown' || phase === 'recording' || phase === 'reading';
 
-  ui.modeRecord.setAttribute('aria-pressed', String(!reading));
-  ui.modeRead.setAttribute('aria-pressed', String(reading));
-  ui.modeRecord.disabled = ui.modeRead.disabled = !idle;
-  ui.modeNote.textContent = reading
-    ? '手話をすると、登録した単語から一番近いものを字幕に出します。'
-    : '単語ごとに見本を登録し、お手本と比べて練習します。';
+  for (const [button, mode] of [[ui.modeRecord, 'record'], [ui.modeRead, 'read'], [ui.modeSpeak, 'speak']] as const) {
+    button.setAttribute('aria-pressed', String(settings.mode === mode));
+    button.disabled = !idle;
+  }
+  ui.modeNote.textContent = {
+    record: '単語ごとに見本を登録し、お手本と比べて練習します。',
+    read: '手話をすると、登録した単語から一番近いものを字幕に出します。',
+    speak: '話した言葉を字幕にして、単語帳にある言葉の見本を手話モーションで順に見せます。',
+  }[settings.mode];
   ui.transcript.hidden = !reading;
   ui.caption.hidden = !reading || !stream || Boolean(importing);
+  ui.speak.hidden = ui.motion.hidden = !speaking;
+  ui.viewport.classList.toggle('speaking', speaking);
+  ui.viewport.classList.toggle('with-camera', stream !== null);
+  ui.speakCamera.hidden = stream !== null;
 
   ui.recordRef.disabled = !canShoot;
   ui.recordTry.disabled = !canShoot || !ref;
   ui.pickFile.textContent = reading ? '動画に字幕を付ける' : '動画ファイルから読み込む';
   ui.pickFile.disabled = !(tracker && idle && (reading ? templates.length : word));
+  ui.pickFile.hidden = speaking;
   ui.stopRec.hidden = !busy;
-  ui.recordRef.hidden = ui.recordTry.hidden = busy || reading;
+  ui.recordRef.hidden = ui.recordTry.hidden = busy || reading || speaking;
   ui.stopRec.textContent = importing ? '読み込みをやめる' : phase === 'countdown' ? 'やめる' : '停止';
+
+  if (speaking) {
+    const vocabulary = new Set(templates.map((t) => t.word.id)).size;
+    ui.micToggle.disabled = !speechSupported();
+    ui.controlsHint.textContent = !vocabulary
+      ? '手話モーションにできる単語がまだありません。記録モードで見本を撮るか、単語帳を読み込んでください。'
+      : !speechSupported()
+        ? `見本のある${vocabulary}語を手話モーションにできます。このブラウザは音声認識に対応していないので、文を入力してください（Chrome か Safari なら話せます）。`
+        : `見本のある${vocabulary}語を手話モーションにできます。「話す」を押して話すか、文を入力してください。`;
+    return;
+  }
 
   if (reading) {
     const samples = templates.length;
@@ -1015,8 +1053,109 @@ function setMode(mode: Mode): void {
   saveSettings();
   live = null;
   showPending(false);
-  if (mode === 'read') hideResult();
+  if (mode !== 'record') hideResult();
+  if (mode !== 'speak') {
+    listener.stop();
+    player.stop();
+  }
   updateControls();
+  if (mode === 'speak') player.redraw();
+}
+
+// ---------------------------------------------------------------- speak mode
+
+interface Spoken {
+  text: string;
+  tokens: Token[];
+  items: MotionItem[];
+}
+
+let spoken: Spoken | null = null;
+/** Sentences spoken or typed so far, newest first. */
+const spokenHistory: string[] = [];
+
+const player = new MotionPlayer(ui.motionCanvas, (index) => {
+  ui.motionWord.textContent = index === null ? '' : (spoken?.items[index]?.word.label ?? '');
+  renderSentence(index);
+});
+player.flip = settings.mirrorView;
+
+const listener = new Listener({
+  interim: (text) => {
+    ui.speakLive.textContent = text;
+  },
+  final: (text) => {
+    ui.speakLive.textContent = '';
+    speakSentence(text);
+  },
+  error: (code) => {
+    const reason: Record<string, string> = {
+      'not-allowed': 'マイクの使用が許可されていません。アドレスバーの設定からマイクを許可してください。',
+      'service-not-allowed': 'このブラウザでは音声認識を使えません。文を入力してください。',
+      'audio-capture': 'マイクが見つかりませんでした。マイクをつないでから、もう一度押してください。',
+      network: '音声認識のサーバーにつながりませんでした。ネットワークを確かめてください。',
+    };
+    say(reason[code] ?? `音声認識が止まりました（${code}）。`, 'error');
+  },
+  listening: (on) => {
+    ui.micToggle.setAttribute('aria-pressed', String(on));
+    ui.micToggle.textContent = on ? '聞くのをやめる' : '話す';
+    ui.speakLive.textContent = on ? '聞いています…' : '';
+  },
+});
+
+/** The sample shown for a word: its reference when that is a sample, otherwise its first sample. */
+function sampleFor(word: Word): Clip | null {
+  const own = templates.filter((t) => t.word.id === word.id);
+  return (own.find((t) => t.clip.id === word.referenceId) ?? own[0])?.clip ?? null;
+}
+
+function speakSentence(text: string): void {
+  const tokens = toSigns(text, words);
+  const items = tokens.flatMap((t) => {
+    const clip = t.word ? sampleFor(t.word) : null;
+    return t.word && clip ? [{ word: t.word, clip }] : [];
+  });
+  spoken = { text, tokens, items };
+  if (spokenHistory[0] !== text) spokenHistory.unshift(text);
+  spokenHistory.splice(20);
+  renderHistory();
+  player.load(items);
+  ui.motionReplay.disabled = !items.length;
+  renderSentence(null);
+  if (items.length) player.play();
+  else say('この文には、見本のある単語が見つかりませんでした。記録モードで単語と見本を足してください。');
+}
+
+/** The sentence as a caption: signed words are buttons that replay from there, the rest is plain text. */
+function renderSentence(current: number | null): void {
+  if (!spoken) {
+    ui.speakSentence.replaceChildren();
+    return;
+  }
+  let n = 0;
+  ui.speakSentence.replaceChildren(
+    ...spoken.tokens.map((t) => {
+      if (!t.word) return document.createTextNode(t.text);
+      if (!sampleFor(t.word)) return el('span', { className: 'no-sample', title: 'まだ見本がありません', textContent: t.text });
+      const index = n++;
+      return el('button', {
+        type: 'button',
+        className: index === current ? 'sign is-current' : 'sign',
+        title: `${t.word.label}をここから再生`,
+        textContent: t.text,
+        onclick: () => player.play(index),
+      });
+    }),
+  );
+}
+
+function renderHistory(): void {
+  ui.speakHistory.replaceChildren(
+    ...spokenHistory.map((text) =>
+      el('li', {}, el('button', { type: 'button', textContent: text, onclick: () => speakSentence(text) })),
+    ),
+  );
 }
 
 function readSign(sign: Segment, where: string): void {
@@ -1360,6 +1499,8 @@ function bindSettings(): void {
   };
   ui.setMirrorView.onchange = () => {
     settings.mirrorView = ui.setMirrorView.checked;
+    player.flip = settings.mirrorView;
+    if (!player.playing) player.redraw();
     saveSettings();
     ui.viewport.classList.toggle('mirrored', settings.mirrorView);
     drawDuet();
@@ -1393,6 +1534,18 @@ function bindEvents(): void {
   };
   ui.modeRecord.onclick = () => setMode('record');
   ui.modeRead.onclick = () => setMode('read');
+  ui.modeSpeak.onclick = () => setMode('speak');
+  ui.micToggle.onclick = () => (listener.listening ? listener.stop() : listener.start());
+  ui.sentenceForm.onsubmit = (e) => {
+    e.preventDefault();
+    const text = ui.sentenceInput.value.trim();
+    if (text) speakSentence(text);
+  };
+  ui.motionReplay.onclick = () => player.play();
+  ui.motionSlow.onchange = () => {
+    player.speed = ui.motionSlow.checked ? 0.5 : 1;
+  };
+  ui.speakCamera.onclick = () => void startCamera();
   ui.clearTranscript.onclick = clearTranscript;
   ui.copyTranscript.onclick = () => void copyTranscript();
 
@@ -1427,7 +1580,10 @@ function bindEvents(): void {
     duetPos = ((e.clientX - box.left) / box.width) * shown.res.path.length;
     drawDuet();
   };
-  window.addEventListener('resize', drawDuet);
+  window.addEventListener('resize', () => {
+    drawDuet();
+    if (settings.mode === 'speak' && !player.playing) player.redraw();
+  });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && phase !== 'idle') {
