@@ -16,6 +16,18 @@
     <header class="topbar">
       <h1>手話れんしゅう帳</h1>
       <p class="status" id="status" role="status">モデルを読み込んでいます</p>
+      <div
+        class="loadbar"
+        id="loadbar"
+        role="progressbar"
+        aria-label="モデルの読み込み"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="0"
+        hidden
+      >
+        <span id="loadbarFill"></span>
+      </div>
     </header>
 
     <main class="layout">
@@ -26,6 +38,7 @@
           <div class="viewport-empty" id="viewportEmpty">
             <p>カメラに上半身と両手が映るようにすると、手と体の動きを記録できます。</p>
             <button type="button" class="primary" id="startCamera">カメラを使う</button>
+            <ol class="load-steps" id="loadSteps" aria-label="モデルの読み込み" hidden></ol>
           </div>
           <div class="countdown" id="countdown" hidden></div>
           <p class="rec-badge" id="recBadge" hidden>記録中 <span id="recTime">0.0</span>秒</p>

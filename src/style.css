@@ -154,6 +154,7 @@ input[type='checkbox'] {
 /* Page frame */
 
 .topbar {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -175,6 +176,29 @@ input[type='checkbox'] {
 
 .status.error {
   color: var(--heat-high);
+}
+
+/* Fills the header's bottom rule while the models load. */
+.loadbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 3px;
+}
+
+.loadbar span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--ink);
+  transition: width 200ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loadbar span {
+    transition: none;
+  }
 }
 
 .layout {
@@ -256,6 +280,37 @@ input[type='checkbox'] {
   background: #f2f4f7;
   border-color: #f2f4f7;
   color: #1b2a4a;
+}
+
+.load-steps {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  width: min(16em, 100%);
+  display: grid;
+  gap: 2px;
+  font-size: 0.8125rem;
+  color: #8f9bb3;
+  text-align: left;
+}
+
+.load-steps li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.load-steps li.is-done {
+  color: #c9d2e3;
+}
+
+.load-steps li.is-current {
+  color: #ffffff;
+  font-weight: 500;
+}
+
+.load-steps .state {
+  font-variant-numeric: tabular-nums;
 }
 
 .countdown {

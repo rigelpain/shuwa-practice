@@ -4,7 +4,7 @@ import { bodyFrame, type BodyFrame } from './features';
 import { ClipRecorder, trimToHands } from './recorder';
 import { compareClips, type CompareResult } from './scoring';
 import * as db from './storage';
-import { Tracker } from './tracker';
+import { Tracker, type LoadEvent, type LoadStep } from './tracker';
 import type { Clip, Frame, Word } from './types';
 
 type Kind = 'reference' | 'practice';
@@ -26,6 +26,9 @@ function $<T extends HTMLElement = HTMLElement>(id: string): T {
 
 const ui = {
   status: $('status'),
+  loadbar: $('loadbar'),
+  loadbarFill: $('loadbarFill'),
+  loadSteps: $('loadSteps'),
   viewport: $('viewport'),
   video: $<HTMLVideoElement>('video'),
   overlay: $<HTMLCanvasElement>('overlay'),
@@ -185,6 +188,94 @@ function say(message: string, kind: 'info' | 'error' = 'info'): void {
 function setStatus(message: string, error = false): void {
   ui.status.textContent = message;
   ui.status.classList.toggle('error', error);
+}
+
+// ---------------------------------------------------------------- model loading
+
+const LOAD_LABELS: Record<LoadStep, string> = {
+  runtime: '実行環境',
+  hands: '手のモデル',
+  pose: '体のモデル',
+  face: '表情のモデル',
+};
+
+interface StepState {
+  loaded: number;
+  total: number | null;
+  done: boolean;
+}
+
+let loading: Map<LoadStep, StepState> | null = null;
+
+function startLoading(steps: LoadStep[]): void {
+  loading = new Map(steps.map((step) => [step, { loaded: 0, total: null, done: false }]));
+  ui.loadbar.hidden = false;
+  ui.loadSteps.hidden = false;
+  renderLoading();
+}
+
+function onLoad(event: LoadEvent): void {
+  const state = loading?.get(event.step);
+  if (!state) return;
+  state.loaded = event.loaded;
+  state.total = event.total ?? state.total;
+  state.done ||= event.done;
+  renderLoading();
+}
+
+function finishLoading(): void {
+  loading = null;
+  ui.loadbar.hidden = true;
+  ui.loadSteps.hidden = true;
+}
+
+const fraction = (s: StepState) => (s.done ? 1 : s.total ? Math.min(s.loaded / s.total, 0.99) : 0);
+
+/** "45%" when the size is known, otherwise how much has arrived. */
+function amount(s: StepState, step = 1): string {
+  if (!s.total) return `${(s.loaded / 1e6).toFixed(1)}MB`;
+  return `${Math.floor((fraction(s) * 100) / step) * step}%`;
+}
+
+function renderLoading(): void {
+  if (!loading) return;
+  const steps = [...loading];
+  // Weigh steps by size once every size is known: the runtime alone is about as big as all models together.
+  const sized = steps.every(([, s]) => s.total);
+  const overall = sized
+    ? steps.reduce((sum, [, s]) => sum + fraction(s) * s.total!, 0) / steps.reduce((sum, [, s]) => sum + s.total!, 0)
+    : steps.reduce((sum, [, s]) => sum + fraction(s), 0) / steps.length;
+
+  const current = steps.findIndex(([, s]) => !s.done);
+  const preparing = (s: StepState) => s.total !== null && s.loaded >= s.total;
+  let text = 'モデルの準備ができました';
+  if (current >= 0) {
+    const [step, s] = steps[current];
+    const where = `${current + 1}/${steps.length}`;
+    // The status line is announced to screen readers, so it moves in 10% steps.
+    text = preparing(s)
+      ? `${LOAD_LABELS[step]}を準備しています（${where}）`
+      : `${LOAD_LABELS[step]}を読み込んでいます（${where}、${amount(s, 10)}）`;
+  }
+  setStatus(text);
+
+  ui.loadbarFill.style.width = `${(overall * 100).toFixed(1)}%`;
+  ui.loadbar.setAttribute('aria-valuenow', String(Math.round(overall * 100)));
+  ui.loadbar.setAttribute('aria-valuetext', text);
+
+  ui.loadSteps.replaceChildren(
+    ...steps.map(([step, s], i) => {
+      const state = s.done ? '済み' : i !== current ? '' : preparing(s) ? '準備中' : amount(s);
+      const item = el(
+        'li',
+        { className: s.done ? 'is-done' : i === current ? 'is-current' : '' },
+        el('span', { textContent: LOAD_LABELS[step] }),
+        el('span', { className: 'state', textContent: state }),
+      );
+      if (i === current) item.setAttribute('aria-current', 'step');
+      return item;
+    }),
+  );
 }
 
 // ---------------------------------------------------------------- camera and tracking
@@ -873,10 +964,17 @@ function bindSettings(): void {
   ui.setRecordFace.onchange = async () => {
     settings.recordFace = ui.setRecordFace.checked;
     saveSettings();
+    if (!tracker) return;
+    const loadsModel = settings.recordFace && !tracker.faceEnabled;
+    if (loadsModel) startLoading(['face']);
     try {
-      await tracker?.setFace(settings.recordFace);
+      await tracker.setFace(settings.recordFace, onLoad);
+      if (loadsModel) setStatus('準備ができました');
     } catch (err) {
+      setStatus('準備ができました');
       say(`表情のモデルを読み込めませんでした（${errorText(err)}）。`, 'error');
+    } finally {
+      if (loadsModel) finishLoading();
     }
   };
   ui.setUseFace.onchange = () => {
@@ -970,13 +1068,15 @@ async function init(): Promise<void> {
   else renderWords();
   updateControls();
 
+  startLoading(Tracker.steps(settings.recordFace));
   try {
-    tracker = await Tracker.create();
-    if (settings.recordFace) await tracker.setFace(true);
+    tracker = await Tracker.create({ face: settings.recordFace, onProgress: onLoad });
     setStatus('準備ができました');
   } catch (err) {
     console.error(err);
     setStatus(`手の検出モデルを読み込めませんでした。ページを再読み込みしてください（${errorText(err)}）`, true);
+  } finally {
+    finishLoading();
   }
   updateControls();
 }

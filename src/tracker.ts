@@ -8,6 +8,7 @@ import {
   type Landmark,
   type NormalizedLandmark,
 } from '@mediapipe/tasks-vision';
+import { download, loadSizes } from './download';
 import { POSE, POSE_KEEP } from './features';
 import { FACE_KEYS, type FrameData } from './types';
 
@@ -19,6 +20,28 @@ type WasmFileset = Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>;
 /** Size of the square the face crop is scaled to. */
 const FACE_CROP = 256;
 
+export type LoadStep = 'runtime' | 'hands' | 'pose' | 'face';
+
+/** Progress of one loading step. `done` turns true once that part is ready to use. */
+export interface LoadEvent {
+  step: LoadStep;
+  loaded: number;
+  total: number | null;
+  done: boolean;
+}
+
+export type LoadListener = (event: LoadEvent) => void;
+
+type ModelStep = Exclude<LoadStep, 'runtime'>;
+
+const MODEL_FILES: Record<ModelStep, string> = {
+  hands: 'hand_landmarker.task',
+  pose: 'pose_landmarker_lite.task',
+  face: 'face_landmarker.task',
+};
+
+const fileName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+
 async function withFallback<T>(create: (delegate: Delegate) => Promise<T>): Promise<T> {
   try {
     return await create('GPU');
@@ -26,6 +49,13 @@ async function withFallback<T>(create: (delegate: Delegate) => Promise<T>): Prom
     console.warn('GPU delegate unavailable, falling back to CPU', err);
     return create('CPU');
   }
+}
+
+function fetchModel(step: ModelStep, sizes: Record<string, number>, report: LoadListener) {
+  const name = MODEL_FILES[step];
+  return download(`${ASSETS}/models/${name}`, sizes[name] ?? null, (loaded, total) =>
+    report({ step, loaded, total, done: false }),
+  );
 }
 
 function flat(points: (NormalizedLandmark | Landmark)[]): number[] {
@@ -41,47 +71,85 @@ function flat(points: (NormalizedLandmark | Landmark)[]): number[] {
 /** Runs the hand, pose and (optionally) face landmarkers on video frames. */
 export class Tracker {
   private face: FaceLandmarker | null = null;
+  private faceModel: Uint8Array | null = null;
   private lastTimestamp = 0;
 
   private constructor(
     private readonly fileset: WasmFileset,
     private readonly hands: HandLandmarker,
     private readonly pose: PoseLandmarker,
+    private readonly sizes: Record<string, number>,
   ) {}
 
-  static async create(): Promise<Tracker> {
-    const fileset = await FilesetResolver.forVisionTasks(`${ASSETS}/wasm`);
+  /** The steps `create` goes through, in order. */
+  static steps(face: boolean): LoadStep[] {
+    return face ? ['runtime', 'hands', 'pose', 'face'] : ['runtime', 'hands', 'pose'];
+  }
+
+  static async create(opts: { face: boolean; onProgress?: LoadListener }): Promise<Tracker> {
+    const report = opts.onProgress ?? (() => {});
+    const sizes = await loadSizes(`${ASSETS}/sizes.json`);
+    const base = await FilesetResolver.forVisionTasks(`${ASSETS}/wasm`);
+    const runtimeFile = fileName(base.wasmBinaryPath);
+
+    // Announce every size up front so overall progress can be weighed by bytes.
+    for (const step of Tracker.steps(opts.face)) {
+      const total = sizes[step === 'runtime' ? runtimeFile : MODEL_FILES[step]] ?? null;
+      report({ step, loaded: 0, total, done: false });
+    }
+
+    // Fetch the runtime ourselves so its progress can be shown; each task then starts it from memory.
+    const wasm = await download(base.wasmBinaryPath, sizes[runtimeFile] ?? null, (loaded, total) =>
+      report({ step: 'runtime', loaded, total, done: false }),
+    );
+    const fileset: WasmFileset = {
+      ...base,
+      wasmBinaryPath: URL.createObjectURL(new Blob([wasm], { type: 'application/wasm' })),
+    };
+    report({ step: 'runtime', loaded: wasm.length, total: wasm.length, done: true });
+
+    const handModel = await fetchModel('hands', sizes, report);
     const hands = await withFallback((delegate) =>
       HandLandmarker.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: `${ASSETS}/models/hand_landmarker.task`, delegate },
+        baseOptions: { modelAssetBuffer: handModel, delegate },
         runningMode: 'VIDEO',
         numHands: 2,
       }),
     );
+    report({ step: 'hands', loaded: handModel.length, total: handModel.length, done: true });
+
+    const poseModel = await fetchModel('pose', sizes, report);
     const pose = await withFallback((delegate) =>
       PoseLandmarker.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: `${ASSETS}/models/pose_landmarker_lite.task`, delegate },
+        baseOptions: { modelAssetBuffer: poseModel, delegate },
         runningMode: 'VIDEO',
         numPoses: 1,
       }),
     );
-    return new Tracker(fileset, hands, pose);
+    report({ step: 'pose', loaded: poseModel.length, total: poseModel.length, done: true });
+
+    const tracker = new Tracker(fileset, hands, pose, sizes);
+    if (opts.face) await tracker.setFace(true, report);
+    return tracker;
   }
 
   get faceEnabled(): boolean {
     return this.face !== null;
   }
 
-  async setFace(enabled: boolean): Promise<void> {
+  async setFace(enabled: boolean, onProgress: LoadListener = () => {}): Promise<void> {
     if (enabled && !this.face) {
+      this.faceModel ??= await fetchModel('face', this.sizes, onProgress);
+      const model = this.faceModel;
       this.face = await withFallback((delegate) =>
         FaceLandmarker.createFromOptions(this.fileset, {
-          baseOptions: { modelAssetPath: `${ASSETS}/models/face_landmarker.task`, delegate },
+          baseOptions: { modelAssetBuffer: model, delegate },
           runningMode: 'VIDEO',
           numFaces: 1,
           outputFaceBlendshapes: true,
         }),
       );
+      onProgress({ step: 'face', loaded: model.length, total: model.length, done: true });
     } else if (!enabled && this.face) {
       this.face.close();
       this.face = null;

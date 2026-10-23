@@ -1,6 +1,6 @@
 // Copies the MediaPipe WASM runtime and downloads the landmark models into
 // public/mediapipe so the app runs without loading anything from a CDN.
-import { access, cp, mkdir, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, readdir, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,3 +39,11 @@ for (const [name, url] of Object.entries(MODELS)) {
   if (!res.ok) throw new Error(`${name}: HTTP ${res.status} from ${url}`);
   await writeFile(dest, Buffer.from(await res.arrayBuffer()));
 }
+
+// Real file sizes, so the app can show loading progress even when the server
+// compresses responses and Content-Length no longer matches.
+const sizes = {};
+for (const dir of ['models', 'wasm']) {
+  for (const name of await readdir(join(out, dir))) sizes[name] = (await stat(join(out, dir, name))).size;
+}
+await writeFile(join(out, 'sizes.json'), `${JSON.stringify(sizes, null, 2)}\n`);
