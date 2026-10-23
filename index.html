@@ -141,6 +141,11 @@
           <input type="text" id="wordInput" placeholder="単語を追加（例：ありがとう）" autocomplete="off" required />
           <button type="submit">追加</button>
         </form>
+        <div class="bulk" id="bulk">
+          <button type="button" class="quiet" id="pickSamples">動画をまとめて見本にする</button>
+          <span class="starter-note">ファイル名を単語名として読みます（例：おはよう.mp4、おはよう_2.mp4）。</span>
+          <input type="file" id="samplesInput" accept="video/*" multiple hidden />
+        </div>
         <div class="starter" id="starter">
           <button type="button" class="quiet" id="addStarter">基本の単語と言い回しを追加</button>
           <span class="starter-note">見本は入っていません。手話者が撮ると読み取れるようになります。</span>

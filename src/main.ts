@@ -2,6 +2,7 @@ import './style.css';
 import { drawFigure, drawOverlay, drawTimeline, fitCanvas, fitView, type Backdrop, type FigureView } from './draw';
 import { bodyFrame, type BodyFrame } from './features';
 import { ACCEPT_SCORE, recognize, Segmenter, segmentClip, type Recognition, type Segment, type Template } from './reader';
+import { labelFromFileName } from './batch';
 import { MotionPlayer, type MotionItem } from './player';
 import { ClipRecorder, trimToHands } from './recorder';
 import { compareClips, type CompareResult, type Hint } from './scoring';
@@ -95,6 +96,9 @@ const ui = {
   wordLegend: $('wordLegend'),
   starter: $('starter'),
   addStarter: $<HTMLButtonElement>('addStarter'),
+  bulk: $('bulk'),
+  pickSamples: $<HTMLButtonElement>('pickSamples'),
+  samplesInput: $<HTMLInputElement>('samplesInput'),
   setAutoNext: $<HTMLInputElement>('setAutoNext'),
   wordDetail: $('wordDetail'),
   exportData: $<HTMLButtonElement>('exportData'),
@@ -507,7 +511,7 @@ async function finish(save: boolean): Promise<void> {
 
   try {
     const video = importing ? importing.file : await rec.stop();
-    if (save) await saveClip(rec.frames, video, recordKind);
+    if (save) lastSaved = await saveClip(rec.frames, video, recordKind);
     else say('記録を取り消しました。');
   } catch (err) {
     console.error(err);
@@ -519,13 +523,14 @@ async function finish(save: boolean): Promise<void> {
   }
 }
 
-async function saveClip(frames: Frame[], video: Blob | null, kind: Kind): Promise<void> {
+/** Saves a recording to the selected word; false when there was too little hand to keep. */
+async function saveClip(frames: Frame[], video: Blob | null, kind: Kind): Promise<boolean> {
   const word = selectedWord();
-  if (!word) return;
+  if (!word) return false;
   const kept = trimToHands(frames);
   if (kept.length < MIN_FRAMES) {
-    say('手がほとんど映っていなかったので保存しませんでした。両手がカメラに入る位置で、もう一度撮ってください。', 'error');
-    return;
+    if (!batch) say('手がほとんど映っていなかったので保存しませんでした。両手がカメラに入る位置で、もう一度撮ってください。', 'error');
+    return false;
   }
   const clip: Clip = {
     id: crypto.randomUUID(),
@@ -552,11 +557,12 @@ async function saveClip(frames: Frame[], video: Blob | null, kind: Kind): Promis
   if (kind === 'sample') {
     hideResult();
     const count = clips.filter((c) => clipKind(c, word) === 'sample').length;
+    if (batch) return true;
     const next = becomesReference && settings.autoNext ? nextWordWithoutSamples(word.id) : null;
     if (next) {
       await selectWord(next.id, true);
       say(`「${word.label}」の見本を保存しました。次は「${next.label}」です。`);
-      return;
+      return true;
     }
     say(
       becomesReference
@@ -568,6 +574,7 @@ async function saveClip(frames: Frame[], video: Blob | null, kind: Kind): Promis
     say('練習を保存しました。');
     showResult(clip.id);
   }
+  return true;
 }
 
 function seek(v: HTMLVideoElement, t: number): Promise<void> {
@@ -677,6 +684,67 @@ function endImport(): void {
   URL.revokeObjectURL(importing.url);
   importing = null;
   attachCamera();
+}
+
+/** Progress of "動画をまとめて見本にする", while it runs. */
+let batch: { done: number; total: number } | null = null;
+/** Whether the last finished recording was kept. */
+let lastSaved = false;
+
+/**
+ * Turns a set of video files into samples, one word per file name. Words
+ * that are not in the list yet are added; existing words gain another sample.
+ */
+async function importSampleFiles(files: File[]): Promise<void> {
+  if (!tracker || phase !== 'idle' || !files.length) return;
+  batch = { done: 0, total: files.length };
+  let saved = 0;
+  let created = 0;
+  const failed: string[] = [];
+  let first: string | null = null;
+
+  for (const file of files) {
+    const label = labelFromFileName(file.name);
+    let word = words.find((w) => w.label === label);
+    if (!word) {
+      word = { id: crypto.randomUUID(), label, referenceId: null, createdAt: Date.now() };
+      await db.putWord(word);
+      words.push(word);
+      created++;
+    }
+    selectedId = word.id;
+    first ??= word.id;
+    await loadClips();
+    batch.done++;
+    say(`${batch.done}/${batch.total}　「${label}」を見本にしています。`);
+    try {
+      const duration = await openVideoFile(file);
+      lastSaved = false;
+      beginRecording('sample', null);
+      ui.recLabel.textContent = `${batch.done}/${batch.total} 読み取り中`;
+      await scanVideo(duration, (data, t) => recorder?.push(data, t));
+      const cancelled = importing?.cancelled ?? false;
+      await finish(!cancelled);
+      if (cancelled) break;
+      if (lastSaved) saved++;
+      else failed.push(file.name);
+    } catch {
+      recorder = null;
+      phase = 'idle';
+      ui.recBadge.hidden = true;
+      endImport();
+      failed.push(file.name);
+    }
+  }
+
+  const stopped = batch.done < batch.total;
+  batch = null;
+  await loadTemplates();
+  if (first) await selectWord(first);
+  updateControls();
+  const summary = `${saved}本を見本にしました${created ? `（新しい単語${created}語を追加）` : ''}。`;
+  const note = failed.length ? `手が映っていない、または再生できなかった動画：${failed.join('、')}` : '';
+  say((stopped ? '途中でやめました。' : '') + summary + note, failed.length ? 'error' : 'info');
 }
 
 /** Stop button, Escape and Space all end up here. */
@@ -969,6 +1037,8 @@ function updateControls(): void {
   ui.transcript.hidden = !reading;
   ui.caption.hidden = !reading || !stream || Boolean(importing);
   ui.speak.hidden = ui.motion.hidden = !speaking;
+  ui.bulk.hidden = settings.mode !== 'record';
+  ui.pickSamples.disabled = !(tracker && idle);
   ui.viewport.classList.toggle('speaking', speaking);
   ui.viewport.classList.toggle('with-camera', stream !== null);
   ui.speakCamera.hidden = stream !== null;
@@ -1550,6 +1620,12 @@ function bindEvents(): void {
   ui.copyTranscript.onclick = () => void copyTranscript();
 
   ui.addStarter.onclick = () => void addStarterVocabulary();
+  ui.pickSamples.onclick = () => ui.samplesInput.click();
+  ui.samplesInput.onchange = () => {
+    const files = [...(ui.samplesInput.files ?? [])].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+    ui.samplesInput.value = '';
+    void importSampleFiles(files);
+  };
   ui.addWord.onsubmit = (e) => {
     e.preventDefault();
     const label = ui.wordInput.value.trim();

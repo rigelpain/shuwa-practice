@@ -704,6 +704,7 @@ input[type='checkbox'] {
   flex: 1;
 }
 
+.bulk,
 .starter {
   display: flex;
   flex-wrap: wrap;
@@ -712,6 +713,7 @@ input[type='checkbox'] {
   margin-top: -8px;
 }
 
+.bulk button,
 .starter button {
   padding-inline: 0;
 }
