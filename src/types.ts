@@ -67,6 +67,11 @@ export interface Clip {
    * family or community: '' is the word's main version. Missing in older clips.
    */
   variant?: string;
+  /**
+   * For a clip cut from a longer video whose file was kept: that video's id in
+   * the video store and where the clip sits in it. Clips with only bones have none.
+   */
+  source?: { videoId: string; startMs: number; endMs: number };
   /** Who signed it. Kept so training data can later be split by person. */
   signer: string;
   createdAt: number;

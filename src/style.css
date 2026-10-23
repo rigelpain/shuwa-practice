@@ -519,8 +519,133 @@ input[type='checkbox'] {
 }
 
 .transcript,
-.speak {
+.speak,
+.cutter {
   margin-top: 20px;
+}
+
+.cutter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.cutter-head h2 {
+  font-size: 1.125rem;
+  font-weight: 700;
+}
+
+.cutter-source {
+  font-size: 0.875rem;
+  color: var(--ink-soft);
+}
+
+.cutter-video {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  margin-top: 8px;
+  background: var(--stage);
+  border-radius: var(--radius);
+}
+
+.cutter-defaults {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 10px;
+  font-size: 0.875rem;
+}
+
+.cutter-defaults label:not(.check) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+}
+
+.cutter-defaults input[type='text'] {
+  width: 9em;
+}
+
+.cutter-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.cut {
+  display: grid;
+  grid-template-columns: auto 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cut:not(.is-on) {
+  opacity: 0.6;
+}
+
+.cut canvas {
+  width: 72px;
+  height: 72px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.cut-time {
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.cut-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.cut-fields input:first-child {
+  flex: 1;
+  min-width: 8em;
+  font-weight: 700;
+}
+
+.cut-fields input:last-child {
+  width: 8em;
+}
+
+.cut-why {
+  margin-top: 4px;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+}
+
+.cut-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+  margin-top: 4px;
+}
+
+.cut-actions button {
+  padding: 1px 6px;
+  font-size: 0.8125rem;
+}
+
+.cutter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 12px;
 }
 
 .speak-input {

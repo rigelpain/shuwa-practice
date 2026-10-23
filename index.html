@@ -70,6 +70,29 @@
         <p class="controls-hint" id="controlsHint"></p>
         <p class="notice" id="notice" aria-live="polite"></p>
 
+        <section class="cutter" id="cutter" aria-labelledby="cutterTitle" hidden>
+          <div class="cutter-head">
+            <h2 id="cutterTitle">動画から切り出す</h2>
+            <button type="button" class="quiet" id="cutterClose">閉じる</button>
+          </div>
+          <p class="cutter-source" id="cutterSource"></p>
+          <video id="cutterVideo" class="cutter-video" controls playsinline muted></video>
+          <div class="cutter-defaults">
+            <label>版<input type="text" id="cutterVariant" list="variantNames" placeholder="基本" autocomplete="off" /></label>
+            <label>手話をしている人<input type="text" id="cutterSigner" placeholder="任意" autocomplete="off" /></label>
+            <label class="check"><input type="checkbox" id="cutterKeepVideo" /> 元の動画も保存する（権利のある動画のときだけ）</label>
+            <button type="button" class="quiet" id="cutterCaptions">字幕ファイルを読み込む（.srt / .vtt）</button>
+            <input type="file" id="captionInput" accept=".srt,.vtt,text/vtt" hidden />
+          </div>
+          <ol class="cutter-list" id="cutterList"></ol>
+          <div class="cutter-actions">
+            <button type="button" class="primary" id="cutterSave">チェックした区間を見本にする</button>
+            <span class="starter-note">既定では、手・体・表情の座標（ボーン）だけを保存します。</span>
+          </div>
+          <datalist id="wordNames"></datalist>
+          <datalist id="variantNames"></datalist>
+        </section>
+
         <section class="speak" id="speak" aria-label="話して練習" hidden>
           <div class="speak-input">
             <button type="button" class="primary" id="micToggle">話す</button>
@@ -148,6 +171,9 @@
           <button type="button" class="quiet" id="pickSamples">動画をまとめて見本にする</button>
           <span class="starter-note">ファイル名を単語名として読みます（例：おはよう.mp4、おはよう_2.mp4）。</span>
           <input type="file" id="samplesInput" accept="video/*" multiple hidden />
+          <button type="button" class="quiet" id="pickCut">長い動画から切り出す</button>
+          <span class="starter-note">手話の区切りを自動で見つけ、1つずつ単語名を付けて見本にします。</span>
+          <input type="file" id="cutInput" accept="video/*" hidden />
         </div>
         <div class="starter" id="starter">
           <button type="button" class="quiet" id="addStarter">基本の単語と言い回しを追加</button>

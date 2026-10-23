@@ -9,7 +9,10 @@ export interface ExportFile {
   exportedAt: string;
   words: Word[];
   clips: Clip[];
-  /** Recorded videos as data URLs, when they were included. */
+  /**
+   * Recorded videos as data URLs, when they were included. `clipId` is the
+   * clip's id, or for clips cut from a longer video, that video's id.
+   */
   videos?: Array<{ clipId: string; dataUrl: string }>;
 }
 
@@ -129,9 +132,11 @@ export async function exportData(opts: { practice: boolean; videos: boolean }): 
   const withKind = clips.map((c) => ({ ...c, kind: clipKind(c, byId.get(c.wordId)!) }));
   const videos: NonNullable<ExportFile['videos']> = [];
   if (opts.videos) {
-    for (const c of clips) {
-      const blob = await getVideo(c.id);
-      if (blob) videos.push({ clipId: c.id, dataUrl: await toDataUrl(blob) });
+    // A clip's own recording, or the longer video it was cut from (stored once).
+    const ids = new Set(clips.flatMap((c) => [c.id, ...(c.source ? [c.source.videoId] : [])]));
+    for (const id of ids) {
+      const blob = await getVideo(id);
+      if (blob) videos.push({ clipId: id, dataUrl: await toDataUrl(blob) });
     }
   }
   return {

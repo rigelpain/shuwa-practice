@@ -3,10 +3,12 @@ import { drawFigure, drawOverlay, drawTimeline, fitCanvas, fitView, type Backdro
 import { bodyFrame, type BodyFrame } from './features';
 import { ACCEPT_SCORE, recognize, Segmenter, segmentClip, type Recognition, type Segment, type Template } from './reader';
 import { parseSampleName } from './batch';
+import { applyCaptions, cutsFromSegments, framesIn, mergeWithNext, nudge, type Cut } from './cuts';
 import { MotionPlayer, type MotionItem } from './player';
 import { ClipRecorder, trimToHands } from './recorder';
 import { compareClips, type CompareResult, type Hint } from './scoring';
 import { toSigns, type Token } from './sentence';
+import { parseSubtitles } from './subtitles';
 import { Listener, speechSupported } from './speech';
 import * as db from './storage';
 import { Tracker, type LoadEvent, type LoadStep } from './tracker';
@@ -113,6 +115,21 @@ const ui = {
   bulk: $('bulk'),
   pickSamples: $<HTMLButtonElement>('pickSamples'),
   samplesInput: $<HTMLInputElement>('samplesInput'),
+  pickCut: $<HTMLButtonElement>('pickCut'),
+  cutInput: $<HTMLInputElement>('cutInput'),
+  cutter: $('cutter'),
+  cutterClose: $<HTMLButtonElement>('cutterClose'),
+  cutterSource: $('cutterSource'),
+  cutterVideo: $<HTMLVideoElement>('cutterVideo'),
+  cutterVariant: $<HTMLInputElement>('cutterVariant'),
+  cutterSigner: $<HTMLInputElement>('cutterSigner'),
+  cutterKeepVideo: $<HTMLInputElement>('cutterKeepVideo'),
+  cutterCaptions: $<HTMLButtonElement>('cutterCaptions'),
+  captionInput: $<HTMLInputElement>('captionInput'),
+  cutterList: $('cutterList'),
+  cutterSave: $<HTMLButtonElement>('cutterSave'),
+  wordNames: $('wordNames'),
+  variantNames: $('variantNames'),
   setAutoNext: $<HTMLInputElement>('setAutoNext'),
   wordDetail: $('wordDetail'),
   exportData: $<HTMLButtonElement>('exportData'),
@@ -154,6 +171,10 @@ function el<K extends keyof HTMLElementTagNameMap>(
 const fmtDate = (t: number) =>
   new Date(t).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const fmtSec = (ms: number) => `${(ms / 1000).toFixed(1)}秒`;
+const fmtClockTenth = (ms: number) => {
+  const sec = ms / 1000;
+  return `${Math.floor(sec / 60)}:${(sec % 60).toFixed(1).padStart(4, '0')}`;
+};
 const fmtClock = (ms: number) => {
   const sec = Math.floor(ms / 1000);
   return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
@@ -788,6 +809,282 @@ async function importSampleFiles(files: File[]): Promise<void> {
   say((stopped ? '途中でやめました。' : '') + summary + note, failed.length ? 'error' : 'info');
 }
 
+// ---------------------------------------------------------------- cutting a long video
+
+interface Cutter {
+  file: File;
+  url: string;
+  /** Every tracked frame of the video, timed from its start. */
+  frames: Frame[];
+  width: number;
+  height: number;
+  durationMs: number;
+  cuts: Cut[];
+  body: BodyFrame;
+  view: FigureView;
+}
+
+let cutter: Cutter | null = null;
+/** Where the preview of a cut stops. */
+let previewUntil = Infinity;
+
+/** How far the edge buttons move a cut. */
+const NUDGE_MS = 200;
+
+/** Reads a long video, finds the signs in it and lists them for naming. */
+async function openCutter(file: File): Promise<void> {
+  if (!tracker || phase !== 'idle') return;
+  closeCutter();
+  try {
+    const duration = await openVideoFile(file);
+    const width = ui.video.videoWidth;
+    const height = ui.video.videoHeight;
+    phase = 'reading';
+    ui.recLabel.textContent = '区切りを探しています';
+    ui.recBadge.hidden = false;
+    updateControls();
+    say(`「${file.name}」の手話の区切りを探しています。`);
+
+    const frames: Frame[] = [];
+    const segments: Segment[] = [];
+    const segmenter = new Segmenter(width / height);
+    await scanVideo(duration, (data, t) => {
+      frames.push({ t, ...data });
+      const sign = segmenter.push(data, t);
+      if (sign) segments.push(sign);
+    });
+    const last = segmenter.flush();
+    if (last) segments.push(last);
+    if (importing?.cancelled) {
+      say('切り出しをやめました。');
+      return;
+    }
+
+    const opts = { mirror: settings.mirrorCompare, useFace: settings.useFace };
+    const suggest = (sign: Segment) => {
+      if (!templates.length) return null;
+      const rec = recognize(segmentClip(sign, width, height), templates, opts);
+      return rec.word ? rec.candidates[0] : null;
+    };
+    const body = bodyFrame({ frames, width, height });
+    cutter = {
+      file,
+      url: URL.createObjectURL(file),
+      frames,
+      width,
+      height,
+      durationMs: duration * 1000,
+      cuts: cutsFromSegments(segments, suggest),
+      body,
+      view: fitView([{ frames, body }]),
+    };
+    ui.cutterVideo.src = cutter.url;
+    ui.cutterSigner.value = settings.signer;
+    // Keeping a video needs the right to it, so each new video starts with bones only.
+    ui.cutterKeepVideo.checked = false;
+    hideResult();
+    renderCutter();
+    const named = cutter.cuts.filter((c) => c.label).length;
+    say(
+      `${segments.length}個の区切りが見つかりました` +
+        (named ? `。そのうち${named}個は、似ている見本から単語名を入れています` : '') +
+        '。単語名を確かめて、見本にする区間にチェックを入れてください。',
+    );
+  } catch (err) {
+    say(`動画を読み込めませんでした（${errorText(err)}）。`, 'error');
+  } finally {
+    ui.recBadge.hidden = true;
+    endImport();
+    phase = 'idle';
+    updateControls();
+  }
+}
+
+function closeCutter(): void {
+  if (cutter) URL.revokeObjectURL(cutter.url);
+  cutter = null;
+  ui.cutterVideo.removeAttribute('src');
+  ui.cutterList.replaceChildren();
+  updateControls();
+}
+
+function previewCut(cut: Cut): void {
+  const v = ui.cutterVideo;
+  previewUntil = cut.endMs / 1000;
+  v.currentTime = cut.startMs / 1000;
+  void v.play();
+}
+
+function renderCutter(): void {
+  if (!cutter) return;
+  const c = cutter;
+  const chosen = c.cuts.filter((cut) => cut.include && cut.label.trim()).length;
+  ui.cutterSource.textContent = `${c.file.name}（${fmtClock(c.durationMs)}、区切り${c.cuts.length}個）`;
+  ui.cutterSave.textContent = `チェックした区間を見本にする（${chosen}件）`;
+  ui.cutterSave.disabled = chosen === 0;
+
+  const variants = new Set(templates.map((t) => variantOf(t.clip)).filter(Boolean));
+  ui.wordNames.replaceChildren(...words.map((w) => el('option', { value: w.label })));
+  ui.variantNames.replaceChildren(...[...variants].map((v) => el('option', { value: v })));
+
+  const update = (i: number, next: Cut) => {
+    c.cuts[i] = next;
+    renderCutter();
+  };
+  ui.cutterList.replaceChildren(
+    ...c.cuts.map((cut, i) => {
+      const thumb = el('canvas', { width: 144, height: 144 });
+      const frames = framesIn(c.frames, cut);
+      const middle = frames[Math.floor(frames.length / 2)];
+      if (middle) drawFigure(thumb.getContext('2d')!, middle, c.body, c.view, { flip: settings.mirrorView });
+
+      const include = el('input', {
+        type: 'checkbox',
+        checked: cut.include,
+        title: '見本にする',
+        onchange: () => update(i, { ...cut, include: include.checked }),
+      });
+      const label = el('input', {
+        type: 'text',
+        value: cut.label,
+        placeholder: '単語名',
+        onchange: () => update(i, { ...cut, label: label.value.trim(), include: label.value.trim() ? true : cut.include }),
+      });
+      label.setAttribute('list', 'wordNames');
+      label.setAttribute('autocomplete', 'off');
+      label.setAttribute('aria-label', '単語名');
+      const variant = el('input', {
+        type: 'text',
+        value: cut.variant ?? '',
+        placeholder: ui.cutterVariant.value.trim() || '基本',
+        onchange: () => update(i, { ...cut, variant: variant.value.trim() || null }),
+      });
+      variant.setAttribute('list', 'variantNames');
+      variant.setAttribute('autocomplete', 'off');
+      variant.setAttribute('aria-label', '版');
+
+      const why = [
+        cut.caption ? `字幕：「${cut.caption}」` : '',
+        cut.guessedFrom === 'caption' ? '単語名は字幕から推測しました' : '',
+        cut.suggestion
+          ? `似ている見本：${withVariant(cut.suggestion.word.label, cut.suggestion.variant)} ${Math.round(cut.suggestion.score)}点`
+          : '',
+      ].filter(Boolean);
+
+      const button = (text: string, onclick: () => void, title = '') =>
+        el('button', { type: 'button', className: 'quiet', textContent: text, title, onclick });
+      return el(
+        'li',
+        { className: cut.include ? 'cut is-on' : 'cut' },
+        include,
+        thumb,
+        el(
+          'div',
+          {},
+          el('div', {
+            className: 'cut-time',
+            textContent: `${fmtClockTenth(cut.startMs)}〜${fmtClockTenth(cut.endMs)}（${fmtSec(cut.endMs - cut.startMs)}）`,
+          }),
+          el('div', { className: 'cut-fields' }, label, variant),
+          why.length ? el('p', { className: 'cut-why', textContent: why.join('　') }) : null,
+          el(
+            'div',
+            { className: 'cut-actions' },
+            button('見る', () => previewCut(cut)),
+            button('始め −0.2', () => update(i, nudge(cut, 'start', -NUDGE_MS, c.durationMs)), '始めを0.2秒早くする'),
+            button('始め +0.2', () => update(i, nudge(cut, 'start', NUDGE_MS, c.durationMs)), '始めを0.2秒遅くする'),
+            button('終わり −0.2', () => update(i, nudge(cut, 'end', -NUDGE_MS, c.durationMs)), '終わりを0.2秒早くする'),
+            button('終わり +0.2', () => update(i, nudge(cut, 'end', NUDGE_MS, c.durationMs)), '終わりを0.2秒遅くする'),
+            i + 1 < c.cuts.length
+              ? button('次とつなげる', () => {
+                  c.cuts = mergeWithNext(c.cuts, i);
+                  renderCutter();
+                })
+              : null,
+            button('外す', () => {
+              c.cuts.splice(i, 1);
+              renderCutter();
+            }),
+          ),
+        ),
+      );
+    }),
+  );
+}
+
+async function loadCaptions(file: File): Promise<void> {
+  if (!cutter) return;
+  const cues = parseSubtitles(await file.text());
+  if (!cues.length) {
+    say('字幕を読み取れませんでした。SRT か WebVTT 形式のファイルを選んでください。', 'error');
+    return;
+  }
+  const before = cutter.cuts.filter((c) => c.label).length;
+  cutter.cuts = applyCaptions(cutter.cuts, cues, words);
+  const after = cutter.cuts.filter((c) => c.label).length;
+  renderCutter();
+  say(`字幕${cues.length}件を読み込み、${after - before}個の区間に字幕から単語名の候補を入れました。語順が手話と違うことがあるので、見て確かめてください。`);
+}
+
+/** Saves the ticked, named cuts as samples; by default only their bones. */
+async function saveCuts(): Promise<void> {
+  if (!cutter || phase !== 'idle') return;
+  const c = cutter;
+  const chosen = c.cuts.filter((cut) => cut.include && cut.label.trim());
+  const defaultVariant = ui.cutterVariant.value.trim();
+  const signer = ui.cutterSigner.value.trim();
+  const videoId = ui.cutterKeepVideo.checked ? `source-${crypto.randomUUID()}` : null;
+  const saved = new Set<Cut>();
+  const tooShort: string[] = [];
+  let created = 0;
+
+  for (const cut of chosen) {
+    const frames = framesIn(c.frames, cut);
+    const label = cut.label.trim();
+    if (frames.filter((f) => f.left || f.right).length < MIN_FRAMES) {
+      tooShort.push(label);
+      continue;
+    }
+    let word = words.find((w) => w.label === label);
+    if (!word) {
+      word = { id: crypto.randomUUID(), label, referenceId: null, createdAt: Date.now() };
+      words.push(word);
+      created++;
+    }
+    const variant = cut.variant ?? defaultVariant;
+    const clip: Clip = {
+      id: crypto.randomUUID(),
+      wordId: word.id,
+      kind: 'sample',
+      variant,
+      signer,
+      createdAt: Date.now(),
+      width: c.width,
+      height: c.height,
+      durationMs: frames[frames.length - 1].t,
+      frames,
+      ...(videoId ? { source: { videoId, startMs: cut.startMs, endMs: cut.endMs } } : {}),
+    };
+    await db.putClip(clip);
+    if (!referenceFor(word, variant)) setReference(word, variant, clip.id);
+    await db.putWord(word);
+    saved.add(cut);
+  }
+  if (videoId && saved.size) await db.putVideo(videoId, c.file);
+
+  c.cuts = c.cuts.filter((cut) => !saved.has(cut));
+  await loadClips();
+  await loadTemplates();
+  renderDetail();
+  renderCutter();
+  say(
+    `${saved.size}件を見本にしました${created ? `（新しい単語${created}語を追加）` : ''}。` +
+      (videoId ? '元の動画も保存しました。' : '保存したのはボーン（手・体・表情の座標）だけです。') +
+      (tooShort.length ? `手がほとんど映っていない区間は保存しませんでした：${tooShort.join('、')}` : ''),
+    tooShort.length ? 'error' : 'info',
+  );
+}
+
 /** Stop button, Escape and Space all end up here. */
 function stop(save: boolean): void {
   if (importing) importing.cancelled = true;
@@ -900,16 +1197,36 @@ async function showVideo(clip: Clip | null): Promise<void> {
     playerBox.hidden = true;
     return;
   }
-  const kind = clip.id === referenceClip()?.id ? 'お手本' : '練習';
-  const blob = await db.getVideo(clip.id);
+  const word = selectedWord();
+  const kind = clip.id === referenceClip()?.id ? 'お手本' : clipKind(clip, word) === 'sample' ? '見本' : '練習';
+  const source = clip.source;
+  const blob = await db.getVideo(source?.videoId ?? clip.id);
   playerBox.hidden = false;
   viewer.hidden = !blob;
+  viewer.onplay = viewer.ontimeupdate = null;
   if (blob) {
     viewerUrl = URL.createObjectURL(blob);
     viewer.src = viewerUrl;
     viewerCaption.textContent = `${kind}の動画（${fmtDate(clip.createdAt)} 撮影）`;
+    if (source) {
+      // Play only this clip's stretch of the longer video it was cut from.
+      const [from, to] = [source.startMs / 1000, source.endMs / 1000];
+      viewer.onloadedmetadata = () => {
+        viewer.currentTime = from;
+      };
+      viewer.onplay = () => {
+        if (viewer.currentTime < from || viewer.currentTime >= to) viewer.currentTime = from;
+      };
+      viewer.ontimeupdate = () => {
+        if (viewer.currentTime >= to) {
+          viewer.pause();
+          viewer.currentTime = from;
+        }
+      };
+      viewerCaption.textContent = `${kind}の動画（元の動画の ${fmtClockTenth(source.startMs)}〜${fmtClockTenth(source.endMs)}）`;
+    }
   } else {
-    viewerCaption.textContent = `この${kind}には動画がありません。JSONから読み込んだ記録は、手と体の動きだけを持っています。`;
+    viewerCaption.textContent = `この${kind}には動画がありません。手と体と表情の動き（ボーン）だけを持っています。`;
   }
 }
 
@@ -1175,7 +1492,8 @@ function updateControls(): void {
   ui.caption.hidden = !reading || !stream || Boolean(importing);
   ui.speak.hidden = ui.motion.hidden = !speaking;
   ui.bulk.hidden = settings.mode !== 'record';
-  ui.pickSamples.disabled = !(tracker && idle);
+  ui.pickSamples.disabled = ui.pickCut.disabled = !(tracker && idle);
+  ui.cutter.hidden = !cutter || settings.mode !== 'record';
   ui.viewport.classList.toggle('speaking', speaking);
   ui.viewport.classList.toggle('with-camera', stream !== null);
   ui.speakCamera.hidden = stream !== null;
@@ -1790,6 +2108,27 @@ function bindEvents(): void {
 
   ui.addStarter.onclick = () => void addStarterVocabulary();
   ui.pickSamples.onclick = () => ui.samplesInput.click();
+  ui.pickCut.onclick = () => ui.cutInput.click();
+  ui.cutInput.onchange = () => {
+    const file = ui.cutInput.files?.[0];
+    ui.cutInput.value = '';
+    if (file) void openCutter(file);
+  };
+  ui.cutterClose.onclick = closeCutter;
+  ui.cutterSave.onclick = () => void saveCuts();
+  ui.cutterCaptions.onclick = () => ui.captionInput.click();
+  ui.captionInput.onchange = () => {
+    const file = ui.captionInput.files?.[0];
+    ui.captionInput.value = '';
+    if (file) void loadCaptions(file);
+  };
+  ui.cutterVariant.oninput = renderCutter;
+  ui.cutterVideo.ontimeupdate = () => {
+    if (ui.cutterVideo.currentTime >= previewUntil) {
+      ui.cutterVideo.pause();
+      previewUntil = Infinity;
+    }
+  };
   ui.samplesInput.onchange = () => {
     const files = [...(ui.samplesInput.files ?? [])].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
     ui.samplesInput.value = '';
