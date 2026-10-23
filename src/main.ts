@@ -61,6 +61,7 @@ const ui = {
   viewToggles: $('viewToggles'),
   toggleVideo: $<HTMLButtonElement>('toggleVideo'),
   toggleBones: $<HTMLButtonElement>('toggleBones'),
+  toggleFace: $<HTMLButtonElement>('toggleFace'),
   fps: $('fps'),
   startCamera: $<HTMLButtonElement>('startCamera'),
   countdown: $('countdown'),
@@ -206,6 +207,8 @@ interface Settings {
   /** Camera view: show the camera image, and the tracked bones over it. */
   showVideo: boolean;
   showBones: boolean;
+  /** Draw the tracked face (outline, brows, eyes, lips) with the bones. */
+  showFace: boolean;
   mode: Mode;
   /** The origin last entered, offered again for the next video. */
   lastOrigin: Origin;
@@ -226,6 +229,7 @@ const settings: Settings = (() => {
     mirrorView: true,
     showVideo: true,
     showBones: true,
+    showFace: true,
     mode: 'record',
     lastOrigin: emptyOrigin(),
     speakVariant: '',
@@ -419,11 +423,11 @@ let fps = 0;
 let lastFrameAt = 0;
 let fpsShownAt = 0;
 
-function cameraView(): { backdrop: Backdrop; bones: boolean } {
-  const { showVideo, showBones } = settings;
+function cameraView(): { backdrop: Backdrop; bones: boolean; face: boolean } {
+  const { showVideo, showBones, showFace } = settings;
   // With bones on, the tracked frame is drawn under them so they line up; with bones off the live video shows through.
   const backdrop: Backdrop = showBones ? (showVideo ? ui.video : 'dark') : showVideo ? null : 'dark';
-  return { backdrop, bones: showBones };
+  return { backdrop, bones: showBones, face: showFace };
 }
 
 function countFrame(now: number): void {
@@ -2175,7 +2179,7 @@ function bindSettings(): void {
   };
   ui.viewport.classList.toggle('mirrored', settings.mirrorView);
 
-  const bindToggle = (button: HTMLButtonElement, key: 'showVideo' | 'showBones') => {
+  const bindToggle = (button: HTMLButtonElement, key: 'showVideo' | 'showBones' | 'showFace') => {
     button.setAttribute('aria-pressed', String(settings[key]));
     button.onclick = () => {
       settings[key] = !settings[key];
@@ -2185,6 +2189,7 @@ function bindSettings(): void {
   };
   bindToggle(ui.toggleVideo, 'showVideo');
   bindToggle(ui.toggleBones, 'showBones');
+  bindToggle(ui.toggleFace, 'showFace');
 }
 
 function bindEvents(): void {

@@ -1,3 +1,4 @@
+import { FACE_MESH_LINKS } from './face-mesh';
 import { POSE, POSE_HAND, type BodyFrame } from './features';
 import { FACE_KEYS, type FaceKey, type FrameData } from './types';
 
@@ -139,10 +140,25 @@ export type Backdrop = CanvasImageSource | 'dark' | null;
  * itself under the bones keeps the two in step; laying bones over the live
  * video makes them trail behind fast hands.
  */
+/**
+ * The tracked face: outline, brows, eyes and lips as lines, irises as small
+ * rings. The outline is drawn lighter so the features stand out.
+ */
+function drawFaceMesh(ctx: CanvasRenderingContext2D, mesh: number[], project: Project, size: number, color: string): void {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = size;
+  ctx.globalAlpha *= 0.5;
+  strokeLinks(ctx, mesh, 2, FACE_MESH_LINKS.oval, project);
+  ctx.globalAlpha /= 0.5;
+  for (const part of ['brows', 'eyes', 'lips', 'irises'] as const) strokeLinks(ctx, mesh, 2, FACE_MESH_LINKS[part], project);
+  ctx.restore();
+}
+
 export function drawOverlay(
   ctx: CanvasRenderingContext2D,
   frame: FrameData,
-  view: { backdrop: Backdrop; bones: boolean },
+  view: { backdrop: Backdrop; bones: boolean; face: boolean },
 ): void {
   const { width: w, height: h } = ctx.canvas;
   ctx.clearRect(0, 0, w, h);
@@ -156,6 +172,8 @@ export function drawOverlay(
   const project: Project = (x, y) => [x * w, y * h];
   const size = Math.max(2, w / 400);
   ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  if (view.face && frame.faceMesh) drawFaceMesh(ctx, frame.faceMesh, project, size * 0.6, 'rgba(255, 255, 255, 0.85)');
   if (frame.pose) {
     const pose = frame.pose;
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
@@ -242,8 +260,10 @@ export function drawFigure(
     ctx.strokeStyle = p.soft;
     ctx.lineWidth = size * 2.2;
     strokeLinks(ctx, pose, 4, ARM_LINKS, project, vis);
-    drawHead(ctx, pose, frame.face, project, vis, size);
+    // A recorded face is drawn as it was; older clips get the simple glyph.
+    if (!frame.faceMesh) drawHead(ctx, pose, frame.face, project, vis, size);
   }
+  if (frame.faceMesh) drawFaceMesh(ctx, frame.faceMesh, project, size * 0.8, p.ink);
   drawHands(ctx, frame, project, size);
   ctx.restore();
 }

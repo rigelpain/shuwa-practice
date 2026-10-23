@@ -46,6 +46,11 @@ export interface Frame {
    * tilting. Missing in clips recorded before head tracking was added.
    */
   head?: number[] | null;
+  /**
+   * The face's outline, brows, eyes, lips and irises as [x, y] pairs,
+   * image-normalized, in FACE_MESH_POINTS order. Missing in older clips.
+   */
+  faceMesh?: number[] | null;
 }
 
 export type FrameData = Omit<Frame, 't'>;

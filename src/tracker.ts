@@ -9,6 +9,7 @@ import {
   type NormalizedLandmark,
 } from '@mediapipe/tasks-vision';
 import { download, loadSizes } from './download';
+import { FACE_MESH_POINTS } from './face-mesh';
 import { POSE, POSE_KEEP } from './features';
 import { FACE_KEYS, type FrameData } from './types';
 
@@ -75,7 +76,9 @@ export class Tracker {
   private lastTimestamp = 0;
   private tick = 0;
   private lastPose: NormalizedLandmark[] | null = null;
-  private lastFace: Pick<FrameData, 'face' | 'head'> = { face: null, head: null };
+  private lastFace: Pick<FrameData, 'face' | 'head' | 'faceMesh'> = { face: null, head: null, faceMesh: null };
+  /** Where the last face crop sat in the frame, in pixels; null when the whole frame was used. */
+  private lastCrop: { x: number; y: number; side: number; W: number; H: number } | null = null;
 
   private constructor(
     private readonly fileset: WasmFileset,
@@ -183,9 +186,9 @@ export class Tracker {
     const handResult = this.hands.detectForVideo(source, timestamp);
     if (runFace) {
       const result = this.face!.detectForVideo(this.faceCrop(source, this.lastPose), timestamp);
-      this.lastFace = { face: faceScores(result), head: headAngles(result) };
+      this.lastFace = { face: faceScores(result), head: headAngles(result), faceMesh: this.faceMesh(result) };
     } else if (!this.face) {
-      this.lastFace = { face: null, head: null };
+      this.lastFace = { face: null, head: null, faceMesh: null };
     }
 
     const poseLandmarks = this.lastPose;
@@ -213,6 +216,7 @@ export class Tracker {
     const W = source.videoWidth;
     const H = source.videoHeight;
     const nose = pose?.[POSE.nose];
+    this.lastCrop = null;
     if (!pose || !nose || (nose.visibility ?? 0) < 0.5 || !W || !H) return source;
 
     const px = (i: number): [number, number] => [pose[i].x * W, pose[i].y * H];
@@ -227,7 +231,19 @@ export class Tracker {
     const y = Math.min(Math.max(ny - side / 2, 0), H - side);
 
     this.faceCanvas.getContext('2d')!.drawImage(source, x, y, side, side, 0, 0, FACE_CROP, FACE_CROP);
+    this.lastCrop = { x, y, side, W, H };
     return this.faceCanvas;
+  }
+
+  /** The kept face points, moved from the crop back into whole-frame coordinates. */
+  private faceMesh(result: FaceLandmarkerResult): number[] | null {
+    const points = result.faceLandmarks[0];
+    if (!points) return null;
+    const crop = this.lastCrop;
+    return FACE_MESH_POINTS.flatMap((i) => {
+      const p = points[i];
+      return crop ? [(crop.x + p.x * crop.side) / crop.W, (crop.y + p.y * crop.side) / crop.H] : [p.x, p.y];
+    });
   }
 
   private readonly faceCanvas = Object.assign(document.createElement('canvas'), {
