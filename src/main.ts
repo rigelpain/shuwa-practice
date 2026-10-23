@@ -88,6 +88,7 @@ const ui = {
   motionWord: $('motionWord'),
   modeNote: $('modeNote'),
   caption: $('caption'),
+  readState: $('readState'),
   transcript: $('transcript'),
   transcriptList: $('transcriptList'),
   transcriptEmpty: $('transcriptEmpty'),
@@ -483,7 +484,8 @@ function liveFrame(source: FrameSource, aspect: number): void {
     live ??= { segmenter: new Segmenter(aspect), startedAt: performance.now() };
     const sign = live.segmenter.push(data, performance.now() - live.startedAt);
     showPending(live.segmenter.active);
-    if (sign) readSign(sign, `${screen ? '画面' : 'カメラ'} ${fmtClock(sign.startMs)}`);
+    if (sign) readSign(sign, screen ? '画面' : 'カメラ', screen ? screen.origin : ownRecording());
+    renderReadState();
   }
 }
 
@@ -885,7 +887,7 @@ async function captionFile(file: File): Promise<void> {
     const read = (sign: Segment | null) => {
       if (!sign) return;
       found++;
-      readSign(sign, `${file.name} ${fmtClock(sign.startMs)}`);
+      readSign(sign, file.name, emptyOrigin());
     };
     await scanVideo(duration, (data, t) => read(segmenter.push(data, t)));
     read(segmenter.flush());
@@ -1754,6 +1756,7 @@ function updateControls(): void {
   }[settings.mode];
   ui.transcript.hidden = !reading;
   ui.caption.hidden = !reading || !stream || Boolean(importing);
+  renderReadState();
   ui.speak.hidden = ui.motion.hidden = !speaking;
   ui.bulk.hidden = settings.mode !== 'record';
   ui.pickSamples.disabled = ui.pickCut.disabled = !(tracker && idle) || Boolean(screen);
@@ -1827,18 +1830,41 @@ const CAPTION_WORDS = 4;
 const CAPTION_CLEAR_MS = 8000;
 
 interface Caption {
-  /** Where the sign came from: the camera or a file, and when. */
-  where: string;
+  /** Where the sign came from: the camera, a shared screen or a file. */
+  source: string;
+  /** The sign's place in that source, so each caption can be told apart and said again. */
+  startMs: number;
+  endMs: number;
+  /** The sign itself, to replay or keep as a sample. */
+  clip: Clip;
   rec: Recognition;
+  /** The word shown: the best match, or one picked from the candidates. */
+  word: Word | null;
+  variant: string;
+  corrected: boolean;
+  /** The origin a sample kept from this sign gets. */
+  origin: Origin;
+  /** Waiting to be replaced by the next sign. */
+  redo: boolean;
+  saved: boolean;
 }
 
 /** Every sample of every word: what signing is read against. */
 let templates: Template[] = [];
 let live: { segmenter: Segmenter; startedAt: number } | null = null;
 let transcript: Caption[] = [];
-let captionWords: string[] = [];
+/** Captions before this one have faded from the caption line. */
+let captionFrom = 0;
 let captionTimer = 0;
 let pending = false;
+/** What was just read, shown for a moment in the reader's state. */
+let lastDecision: { text: string; at: number } | null = null;
+/** The transcript thumbnail currently replaying its sign. */
+let replaying: MotionPlayer | null = null;
+
+/** How long the state shows what was just read before going back to waiting. */
+const DECISION_MS = 1500;
+const NO_WORD: Word = { id: '', label: '', referenceId: null, createdAt: 0 };
 
 async function loadTemplates(): Promise<void> {
   const byId = new Map(words.map((w) => [w.id, w]));
@@ -1857,6 +1883,7 @@ function setMode(mode: Mode): void {
   saveSettings();
   live = null;
   showPending(false);
+  renderReadState();
   if (mode !== 'record') hideResult();
   if (mode !== 'speak') {
     listener.stop();
@@ -1910,7 +1937,6 @@ const listener = new Listener({
   },
 });
 
-/** The sample shown for a word: its reference when that is a sample, otherwise its first sample. */
 /**
  * The sample shown for a word: the chosen version's reference (or any sample
  * of it) when the word has that version, otherwise its main version's.
@@ -1984,20 +2010,40 @@ function renderHistory(): void {
   );
 }
 
-function readSign(sign: Segment, where: string): void {
+function readSign(sign: Segment, source: string, origin: Origin): void {
   const clip = segmentClip(sign, ui.video.videoWidth, ui.video.videoHeight);
   const rec = recognize(clip, templates, { mirror: settings.mirrorCompare, useFace: settings.useFace });
-  transcript.push({ where, rec });
+  const caption: Caption = {
+    source,
+    startMs: sign.startMs,
+    endMs: sign.endMs,
+    clip,
+    rec,
+    word: rec.word,
+    variant: rec.word ? rec.candidates[0].variant : MAIN_VARIANT,
+    corrected: false,
+    origin,
+    redo: false,
+    saved: false,
+  };
+  // Saying a sign again replaces the caption waiting for it; otherwise it is added.
+  const redoAt = transcript.findIndex((c) => c.redo);
+  if (redoAt >= 0) transcript[redoAt] = caption;
+  else transcript.push(caption);
+  lastDecision = { text: caption.word ? `→ ${captionLabel(caption)}` : '→ ？（読み取れませんでした）', at: performance.now() };
   renderTranscript();
-  showCaption(rec);
+  refreshCaption();
+  renderReadState();
 }
 
-function showCaption(rec: Recognition): void {
-  captionWords = [...captionWords, rec.word ? rec.word.label : '？'].slice(-CAPTION_WORDS);
+const captionLabel = (c: Caption) => (c.word ? withVariant(c.word.label, c.variant) : '？');
+
+/** Shows the latest captions on the caption line, fading them after a pause. */
+function refreshCaption(): void {
   renderCaption();
   clearTimeout(captionTimer);
   captionTimer = window.setTimeout(() => {
-    captionWords = [];
+    captionFrom = transcript.length;
     renderCaption();
   }, CAPTION_CLEAR_MS);
 }
@@ -2010,51 +2056,181 @@ function showPending(on: boolean): void {
 }
 
 function renderCaption(): void {
-  const spans = captionWords.map((w, i) =>
-    el('span', { className: i === captionWords.length - 1 ? 'latest' : '', textContent: w }),
+  const recent = transcript.slice(Math.max(captionFrom, transcript.length - CAPTION_WORDS));
+  const spans = recent.map((c, i) =>
+    el('span', { className: i === recent.length - 1 ? 'latest' : '', textContent: captionLabel(c) }),
   );
   if (pending) spans.push(el('span', { className: 'pending', textContent: '…' }));
   ui.caption.replaceChildren(...spans);
-  ui.caption.classList.toggle('is-empty', !captionWords.length && !pending);
+  ui.caption.classList.toggle('is-empty', !spans.length);
 }
 
-function candidatesText(rec: Recognition): string {
-  const [top, ...rest] = rec.candidates;
-  if (!top) return '';
-  const list = (cs: typeof rec.candidates) =>
-    cs.map((c) => `${withVariant(c.word.label, c.variant)} ${Math.round(c.score)}点`).join('、');
-  if (!rec.word) return `いちばん近いのは${list([top])}でした（${ACCEPT_SCORE}点未満）`;
-  return rest.length ? `${Math.round(top.score)}点　ほかの候補は${list(rest)}` : `${Math.round(top.score)}点`;
+/** Says, on the camera view, whether a sign is being read right now. */
+function renderReadState(): void {
+  const reading = settings.mode === 'read' && stream !== null && phase === 'idle' && !importing;
+  const segmenter = live?.segmenter;
+  const capturing = reading && segmenter?.active === true;
+  ui.readState.hidden = !reading;
+  ui.viewport.classList.toggle('is-capturing', capturing);
+  if (!reading) return;
+  const now = performance.now();
+  let state: string;
+  let text: string;
+  if (capturing && live && segmenter?.startedAt != null) {
+    state = 'capturing';
+    text = `読み取り中 ${((now - live.startedAt - segmenter.startedAt) / 1000).toFixed(1)}秒　手を止めるか下ろすと確定します`;
+  } else if (lastDecision && now - lastDecision.at < DECISION_MS) {
+    state = 'decided';
+    text = lastDecision.text;
+  } else if (transcript.some((c) => c.redo)) {
+    state = 'redo';
+    text = '言い直し待ち：もう一度手話してください';
+  } else {
+    state = 'idle';
+    text = '待機中：手を動かすと読み取ります';
+  }
+  ui.readState.dataset.state = state;
+  ui.readState.textContent = text;
+}
+
+function drawSignThumb(canvas: HTMLCanvasElement, clip: Clip): void {
+  const body = bodyFrame(clip);
+  const middle = clip.frames[Math.floor(clip.frames.length / 2)];
+  if (middle) drawFigure(canvas.getContext('2d')!, middle, body, fitView([{ frames: clip.frames, body }]), { flip: settings.mirrorView });
+}
+
+function replaySign(canvas: HTMLCanvasElement, clip: Clip): void {
+  replaying?.stop();
+  replaying = new MotionPlayer(canvas, () => {});
+  replaying.flip = settings.mirrorView;
+  replaying.load([{ word: NO_WORD, clip }]);
+  replaying.play();
 }
 
 function renderTranscript(): void {
+  replaying?.stop();
+  replaying = null;
   ui.transcriptEmpty.hidden = transcript.length > 0;
+  const button = (text: string, onclick: () => void, title = '') =>
+    el('button', { type: 'button', className: 'quiet', textContent: text, title, onclick });
   ui.transcriptList.replaceChildren(
-    ...transcript.map(({ where, rec }) =>
-      el(
+    ...transcript.map((c, i) => {
+      const thumb = el('canvas', { width: 112, height: 112, title: '読み取った動き' });
+      drawSignThumb(thumb, c.clip);
+      const top = c.rec.candidates[0];
+      const note = c.corrected
+        ? '手で直しました'
+        : c.word
+          ? `${Math.round(top.score)}点`
+          : top
+            ? `${ACCEPT_SCORE}点に届きませんでした`
+            : '比べる見本がありません';
+      const others = c.rec.candidates.filter((cand) => cand.word.id !== c.word?.id || cand.variant !== c.variant);
+      return el(
         'li',
-        { className: rec.word ? '' : 'is-unknown' },
-        el('span', {
-          className: 'said',
-          textContent: rec.word ? withVariant(rec.word.label, rec.candidates[0].variant) : '読み取れませんでした',
-        }),
-        el('span', { className: 'why', textContent: candidatesText(rec) }),
-        el('span', { className: 'when', textContent: where }),
-      ),
-    ),
+        { className: [c.word ? '' : 'is-unknown', c.redo ? 'is-redo' : ''].join(' ').trim() },
+        thumb,
+        el(
+          'div',
+          {},
+          el('div', { className: 'said' }, c.word ? captionLabel(c) : '読み取れませんでした', el('small', { textContent: note })),
+          el('div', {
+            className: 'when',
+            textContent: `${c.source}　${fmtClockTenth(c.startMs)}〜${fmtClockTenth(c.endMs)}（${fmtSec(c.endMs - c.startMs)}）`,
+          }),
+          others.length
+            ? el(
+                'div',
+                { className: 'why' },
+                c.word ? 'ほかの候補：' : '近い候補：',
+                ...others.map((cand) =>
+                  button(
+                    `${withVariant(cand.word.label, cand.variant)} ${Math.round(cand.score)}点`,
+                    () => {
+                      c.word = cand.word;
+                      c.variant = cand.variant;
+                      c.corrected = true;
+                      c.saved = false;
+                      renderTranscript();
+                      refreshCaption();
+                    },
+                    'この単語に直す',
+                  ),
+                ),
+              )
+            : null,
+          el(
+            'div',
+            { className: 'said-actions' },
+            button('動きを見る', () => replaySign(thumb, c.clip)),
+            button(c.redo ? '言い直しをやめる' : '言い直す', () => {
+              for (const other of transcript) other.redo = other === c ? !c.redo : false;
+              renderTranscript();
+              renderReadState();
+            }),
+            button('取り消す', () => {
+              transcript.splice(i, 1);
+              captionFrom = Math.min(captionFrom, transcript.length);
+              renderTranscript();
+              refreshCaption();
+              renderReadState();
+            }),
+            c.word
+              ? el('button', {
+                  type: 'button',
+                  className: 'quiet',
+                  textContent: c.saved ? '見本にしました' : '見本に加える',
+                  title: 'この動きを、この単語の見本として登録します',
+                  disabled: c.saved,
+                  onclick: () => void keepAsSample(c),
+                })
+              : null,
+          ),
+        ),
+      );
+    }),
   );
   ui.transcriptList.scrollTop = ui.transcriptList.scrollHeight;
 }
 
+/** Keeps a read sign as a sample of the word it shows, so later signing is read against it too. */
+async function keepAsSample(c: Caption): Promise<void> {
+  if (!c.word || c.saved) return;
+  const clip: Clip = {
+    ...c.clip,
+    id: crypto.randomUUID(),
+    wordId: c.word.id,
+    kind: 'sample',
+    variant: c.variant,
+    signer: settings.signer.trim(),
+    origin: c.origin,
+    createdAt: Date.now(),
+  };
+  await db.putClip(clip);
+  if (!referenceFor(c.word, c.variant)) {
+    setReference(c.word, c.variant, clip.id);
+    await db.putWord(c.word);
+  }
+  c.saved = true;
+  await loadTemplates();
+  if (selectedId === c.word.id) {
+    await loadClips();
+    renderDetail();
+  }
+  renderTranscript();
+  say(`「${captionLabel(c)}」の見本に加えました。次からはこの動きも読み取りの比較に使います。`);
+}
+
 function clearTranscript(): void {
   transcript = [];
-  captionWords = [];
+  captionFrom = 0;
   renderTranscript();
   renderCaption();
+  renderReadState();
 }
 
 async function copyTranscript(): Promise<void> {
-  const text = transcript.flatMap(({ rec }) => (rec.word ? [rec.word.label] : [])).join(' ');
+  const text = transcript.flatMap((c) => (c.word ? [c.word.label] : [])).join(' ');
   if (!text) {
     say('コピーできる字幕がまだありません。');
     return;
@@ -2479,6 +2655,17 @@ function bindEvents(): void {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && phase !== 'idle') {
       stop(false);
+      return;
+    }
+    // Backspace takes back the last caption while reading.
+    if (e.key === 'Backspace' && settings.mode === 'read' && transcript.length) {
+      if ((e.target as HTMLElement).closest('input, select, textarea')) return;
+      e.preventDefault();
+      transcript.pop();
+      captionFrom = Math.min(captionFrom, transcript.length);
+      renderTranscript();
+      refreshCaption();
+      renderReadState();
       return;
     }
     if (e.code !== 'Space' || (e.target as HTMLElement).closest('input, select, textarea, button, summary, video')) return;

@@ -77,6 +77,16 @@ describe('Segmenter', () => {
     expect(signs[1].startMs).toBeGreaterThan(signs[0].endMs);
   });
 
+  it('tells when the sign being collected started', () => {
+    const segmenter = new Segmenter(ASPECT);
+    const frames = [...idle(5), ...move(10, arc)];
+    frames.forEach((f, n) => segmenter.push(f, n * STEP));
+    expect(segmenter.active).toBe(true);
+    // The pre-roll frames before the movement count as its start.
+    expect(segmenter.startedAt).toBeLessThan(6 * STEP);
+    expect(new Segmenter(ASPECT).startedAt).toBeNull();
+  });
+
   it('ignores a hand that flicks through for a moment', () => {
     expect(run([...idle(5), ...move(4, sweep), ...idle(20)])).toHaveLength(0);
   });

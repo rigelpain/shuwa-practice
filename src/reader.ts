@@ -65,6 +65,11 @@ export class Segmenter {
     return this.current !== null;
   }
 
+  /** When the sign being collected started (ms, on the times given to push), or null. */
+  get startedAt(): number | null {
+    return this.current?.[0]?.t ?? null;
+  }
+
   /** Feeds one frame taken at time `t` (ms); returns a sign when one has just ended. */
   push(data: FrameData, t: number): Segment | null {
     const frame: Frame = { t, ...data };
