@@ -1,4 +1,4 @@
-import { clipKind, type Clip, type Word } from './types';
+import { clipKind, referenceFor, referencesOf, setReference, type Clip, type Word } from './types';
 
 const DB_NAME = 'shuwa-practice';
 
@@ -156,7 +156,15 @@ export async function importData(data: ExportFile): Promise<{ words: number; cli
     const same = existing.get(word.label);
     if (same) {
       wordIds.set(word.id, same.id);
-      if (!same.referenceId && word.referenceId) words.push({ ...same, referenceId: word.referenceId });
+      // Versions the word lacks take the imported references; existing ones are kept.
+      const merged = { ...same };
+      for (const [variant, clipId] of Object.entries(referencesOf(word))) {
+        if (!referenceFor(merged, variant)) setReference(merged, variant, clipId);
+      }
+      if (merged.referenceId !== same.referenceId || merged.references !== same.references) {
+        words.push(merged);
+        existing.set(word.label, merged);
+      }
     } else {
       wordIds.set(word.id, word.id);
       words.push(word);

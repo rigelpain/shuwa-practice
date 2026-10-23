@@ -2,7 +2,7 @@ import './style.css';
 import { drawFigure, drawOverlay, drawTimeline, fitCanvas, fitView, type Backdrop, type FigureView } from './draw';
 import { bodyFrame, type BodyFrame } from './features';
 import { ACCEPT_SCORE, recognize, Segmenter, segmentClip, type Recognition, type Segment, type Template } from './reader';
-import { labelFromFileName } from './batch';
+import { parseSampleName } from './batch';
 import { MotionPlayer, type MotionItem } from './player';
 import { ClipRecorder, trimToHands } from './recorder';
 import { compareClips, type CompareResult, type Hint } from './scoring';
@@ -11,7 +11,19 @@ import { Listener, speechSupported } from './speech';
 import * as db from './storage';
 import { Tracker, type LoadEvent, type LoadStep } from './tracker';
 import { STARTER_VOCABULARY } from './vocabulary';
-import { clipKind, type Clip, type ClipKind, type Frame, type FrameData, type Word } from './types';
+import {
+  clipKind,
+  MAIN_VARIANT,
+  referenceFor,
+  referencesOf,
+  setReference,
+  variantOf,
+  type Clip,
+  type ClipKind,
+  type Frame,
+  type FrameData,
+  type Word,
+} from './types';
 
 type Kind = ClipKind;
 type Mode = 'record' | 'read' | 'speak';
@@ -63,6 +75,8 @@ const ui = {
   motionSlow: $<HTMLInputElement>('motionSlow'),
   speakCamera: $<HTMLButtonElement>('speakCamera'),
   speakHistory: $('speakHistory'),
+  speakVariant: $<HTMLSelectElement>('speakVariant'),
+  speakVariantBox: $('speakVariantBox'),
   motion: $('motion'),
   motionCanvas: $<HTMLCanvasElement>('motionCanvas'),
   motionWord: $('motionWord'),
@@ -161,6 +175,8 @@ interface Settings {
   showVideo: boolean;
   showBones: boolean;
   mode: Mode;
+  /** Version played in the speak mode when a word has it ('' for each word's main version). */
+  speakVariant: string;
   /** After a word's first sample, move on to the next word that has none. */
   autoNext: boolean;
 }
@@ -177,6 +193,7 @@ const settings: Settings = (() => {
     showVideo: true,
     showBones: true,
     mode: 'record',
+    speakVariant: '',
     autoNext: true,
   };
   try {
@@ -226,9 +243,25 @@ let duetLast = 0;
 
 const selectedWord = () => words.find((w) => w.id === selectedId) ?? null;
 
+/** The version of the selected word being recorded and practised. */
+let selectedVariant = MAIN_VARIANT;
+
+const variantLabel = (variant: string) => variant || '基本';
+
+/** "ありがとう" for the main version, "ありがとう（関西）" for another. */
+const withVariant = (label: string, variant: string) => (variant ? `${label}（${variant}）` : label);
+
 function referenceClip(): Clip | null {
-  const id = selectedWord()?.referenceId;
+  const word = selectedWord();
+  const id = word ? referenceFor(word, selectedVariant) : null;
   return id ? (clips.find((c) => c.id === id) ?? null) : null;
+}
+
+/** The selected word's versions, main version first, including one just created and still empty. */
+function variantsOfSelected(): string[] {
+  const word = selectedWord();
+  const names = new Set([...Object.keys(word ? referencesOf(word) : {}), ...clips.map(variantOf), selectedVariant]);
+  return [...names].sort((a, b) => (a === MAIN_VARIANT ? -1 : b === MAIN_VARIANT ? 1 : a.localeCompare(b, 'ja')));
 }
 
 function comparison(ref: Clip, attempt: Clip): CompareResult {
@@ -542,32 +575,34 @@ async function saveClip(frames: Frame[], video: Blob | null, kind: Kind): Promis
     durationMs: kept[kept.length - 1].t,
     frames: kept,
     kind,
+    variant: selectedVariant,
   };
   await db.putClip(clip);
   if (video && video.size > 0) await db.putVideo(clip.id, video);
-  const becomesReference = kind === 'sample' && !word.referenceId;
+  const becomesReference = kind === 'sample' && !referenceFor(word, selectedVariant);
   if (becomesReference) {
-    word.referenceId = clip.id;
+    setReference(word, selectedVariant, clip.id);
     await db.putWord(word);
   }
+  const name = withVariant(word.label, selectedVariant);
   await loadClips();
   await loadTemplates();
   renderWords();
   renderDetail();
   if (kind === 'sample') {
     hideResult();
-    const count = clips.filter((c) => clipKind(c, word) === 'sample').length;
+    const count = clips.filter((c) => variantOf(c) === selectedVariant && clipKind(c, word) === 'sample').length;
     if (batch) return true;
     const next = becomesReference && settings.autoNext ? nextWordWithoutSamples(word.id) : null;
     if (next) {
       await selectWord(next.id, true);
-      say(`「${word.label}」の見本を保存しました。次は「${next.label}」です。`);
+      say(`「${name}」の見本を保存しました。次は「${next.label}」です。`);
       return true;
     }
     say(
       becomesReference
-        ? `「${word.label}」の見本を保存しました。これがお手本になります。見本をもう何回か撮ると、読み取りが安定します。`
-        : `「${word.label}」の見本を保存しました（${count}件目）。読み取りモードで使われます。`,
+        ? `「${name}」の見本を保存しました。これがお手本になります。見本をもう何回か撮ると、読み取りが安定します。`
+        : `「${name}」の見本を保存しました（${count}件目）。読み取りモードで使われます。`,
     );
     await showVideo(clip);
   } else {
@@ -701,10 +736,10 @@ async function importSampleFiles(files: File[]): Promise<void> {
   let saved = 0;
   let created = 0;
   const failed: string[] = [];
-  let first: string | null = null;
+  let first: { id: string; variant: string } | null = null;
 
   for (const file of files) {
-    const label = labelFromFileName(file.name);
+    const { label, variant } = parseSampleName(file.name);
     let word = words.find((w) => w.label === label);
     if (!word) {
       word = { id: crypto.randomUUID(), label, referenceId: null, createdAt: Date.now() };
@@ -713,10 +748,11 @@ async function importSampleFiles(files: File[]): Promise<void> {
       created++;
     }
     selectedId = word.id;
-    first ??= word.id;
+    selectedVariant = variant;
+    first ??= { id: word.id, variant };
     await loadClips();
     batch.done++;
-    say(`${batch.done}/${batch.total}　「${label}」を見本にしています。`);
+    say(`${batch.done}/${batch.total}　「${withVariant(label, variant)}」を見本にしています。`);
     try {
       const duration = await openVideoFile(file);
       lastSaved = false;
@@ -740,7 +776,12 @@ async function importSampleFiles(files: File[]): Promise<void> {
   const stopped = batch.done < batch.total;
   batch = null;
   await loadTemplates();
-  if (first) await selectWord(first);
+  if (first) {
+    // Land on the first file's word and version, as if it had just been chosen.
+    selectedId = null;
+    await selectWord(first.id);
+    await selectVariant(first.variant);
+  }
   updateControls();
   const summary = `${saved}本を見本にしました${created ? `（新しい単語${created}語を追加）` : ''}。`;
   const note = failed.length ? `手が映っていない、または再生できなかった動画：${failed.join('、')}` : '';
@@ -769,6 +810,11 @@ async function addWord(label: string): Promise<void> {
 /** `whileSaving` lets the app itself move on to the next word as a recording is saved. */
 async function selectWord(id: string, whileSaving = false): Promise<void> {
   if (phase !== 'idle' && !(whileSaving && phase === 'saving')) return;
+  if (id !== selectedId) {
+    const word = words.find((w) => w.id === id);
+    const first = word ? Object.keys(referencesOf(word)) : [];
+    selectedVariant = first.includes(MAIN_VARIANT) ? MAIN_VARIANT : (first[0] ?? MAIN_VARIANT);
+  }
   selectedId = id;
   await loadClips();
   hideResult();
@@ -800,8 +846,8 @@ async function removeClip(clip: Clip): Promise<void> {
   const word = selectedWord();
   if (!word || !confirm('この記録を削除します。元に戻せません。')) return;
   await db.deleteClip(clip.id);
-  if (word.referenceId === clip.id) {
-    word.referenceId = null;
+  if (referenceFor(word, variantOf(clip)) === clip.id) {
+    setReference(word, variantOf(clip), null);
     await db.putWord(word);
   }
   await loadTemplates();
@@ -827,7 +873,7 @@ async function makeSample(clip: Clip): Promise<void> {
 async function makeReference(clip: Clip): Promise<void> {
   const word = selectedWord();
   if (!word) return;
-  word.referenceId = clip.id;
+  setReference(word, variantOf(clip), clip.id);
   await db.putWord(word);
   hideResult();
   renderWords();
@@ -960,21 +1006,112 @@ function renderDetail(): void {
       el('h2', { textContent: word.label }),
       el('button', { type: 'button', className: 'quiet danger', textContent: '単語を削除', onclick: () => void removeWord(word) }),
     ),
+    variantBar(word),
   ];
   if (!ref) {
     parts.push(
       el('p', {
         className: 'empty-state',
-        textContent: 'まだ見本がありません。カメラの前で手話をして「見本を撮る」を押すか、手話の動画ファイルを読み込んでください。最初の見本がお手本になります。',
+        textContent: selectedVariant
+          ? `「${selectedVariant}」の版にはまだ見本がありません。「見本を撮る」か動画ファイルで登録してください。この版の最初の見本が、この版のお手本になります。`
+          : 'まだ見本がありません。カメラの前で手話をして「見本を撮る」を押すか、手話の動画ファイルを読み込んでください。最初の見本がお手本になります。',
       }),
     );
   }
   parts.push(playerBox);
-  if (clips.length) parts.push(el('div', { className: 'clips-wrap' }, clipTable(ref)));
+  const own = clips.filter((c) => variantOf(c) === selectedVariant);
+  if (own.length) parts.push(el('div', { className: 'clips-wrap' }, clipTable(ref, own)));
   ui.wordDetail.replaceChildren(...parts);
 }
 
-function clipTable(ref: Clip | null): HTMLTableElement {
+/** Buttons for the word's versions, with their sample counts, and a way to add one. */
+function variantBar(word: Word): HTMLElement {
+  const buttons = variantsOfSelected().map((variant) => {
+    const samples = clips.filter((c) => variantOf(c) === variant && clipKind(c, word) === 'sample').length;
+    const button = el(
+      'button',
+      { type: 'button', className: 'variant', onclick: () => void selectVariant(variant) },
+      variantLabel(variant),
+      el('small', { textContent: String(samples) }),
+    );
+    button.setAttribute('aria-pressed', String(variant === selectedVariant));
+    button.title = `見本${samples}件`;
+    return button;
+  });
+
+  const input = el('input', { type: 'text', placeholder: '版の名前（例：関西、〇〇さん、家族）', required: true });
+  const form = el(
+    'form',
+    {
+      className: 'variant-form',
+      hidden: true,
+      onsubmit: (e: SubmitEvent) => {
+        e.preventDefault();
+        const name = input.value.trim();
+        if (name) void addVariant(word, name);
+      },
+    },
+    input,
+    el('button', { type: 'submit', textContent: '作る' }),
+  );
+  const add = el('button', {
+    type: 'button',
+    className: 'quiet',
+    textContent: '＋ 版を追加',
+    onclick: () => {
+      form.hidden = false;
+      input.focus();
+    },
+  });
+  const hasOwnClips = clips.some((c) => variantOf(c) === selectedVariant);
+  const remove =
+    hasOwnClips && variantsOfSelected().length > 1
+      ? el('button', {
+          type: 'button',
+          className: 'quiet danger',
+          textContent: 'この版を削除',
+          onclick: () => void removeVariant(word, selectedVariant),
+        })
+      : null;
+
+  return el(
+    'div',
+    { className: 'variants' },
+    el('div', { className: 'variant-buttons', role: 'group', ariaLabel: '版' }, ...buttons, add, remove),
+    form,
+  );
+}
+
+async function selectVariant(variant: string): Promise<void> {
+  if (phase !== 'idle') return;
+  selectedVariant = variant;
+  hideResult();
+  renderDetail();
+  updateControls();
+  await showVideo(referenceClip());
+}
+
+async function addVariant(word: Word, name: string): Promise<void> {
+  await selectVariant(name);
+  const exists = clips.some((c) => variantOf(c) === name) || referenceFor(word, name);
+  if (!exists) say(`「${word.label}」に「${name}」の版を作りました。見本を撮って登録してください。`);
+}
+
+async function removeVariant(word: Word, variant: string): Promise<void> {
+  const own = clips.filter((c) => variantOf(c) === variant);
+  if (!confirm(`「${withVariant(word.label, variant)}」の記録${own.length}件を削除します。元に戻せません。`)) return;
+  for (const clip of own) await db.deleteClip(clip.id);
+  setReference(word, variant, null);
+  await db.putWord(word);
+  selectedVariant = MAIN_VARIANT;
+  await loadClips();
+  selectedVariant = variantsOfSelected().find((v) => clips.some((c) => variantOf(c) === v)) ?? MAIN_VARIANT;
+  await loadTemplates();
+  await selectVariant(selectedVariant);
+  say(`「${withVariant(word.label, variant)}」を削除しました。`);
+}
+
+function clipTable(ref: Clip | null, list: Clip[]): HTMLTableElement {
   const head = el(
     'tr',
     {},
@@ -984,7 +1121,7 @@ function clipTable(ref: Clip | null): HTMLTableElement {
     el('th', {}, el('span', { className: 'visually-hidden', textContent: '操作' })),
   );
   const word = selectedWord();
-  const rows = clips.map((clip) => {
+  const rows = list.map((clip) => {
     const isRef = clip.id === ref?.id;
     const isSample = clipKind(clip, word) === 'sample';
     const scoreCell = isRef
@@ -1113,6 +1250,7 @@ async function loadTemplates(): Promise<void> {
     const word = byId.get(clip.wordId);
     return word && clipKind(clip, word) === 'sample' ? [{ word, clip }] : [];
   });
+  renderSpeakVariants();
   renderWords();
   updateControls();
 }
@@ -1145,7 +1283,8 @@ let spoken: Spoken | null = null;
 const spokenHistory: string[] = [];
 
 const player = new MotionPlayer(ui.motionCanvas, (index) => {
-  ui.motionWord.textContent = index === null ? '' : (spoken?.items[index]?.word.label ?? '');
+  const item = index === null ? null : spoken?.items[index];
+  ui.motionWord.textContent = item ? withVariant(item.word.label, variantOf(item.clip)) : '';
   renderSentence(index);
 });
 player.flip = settings.mirrorView;
@@ -1175,9 +1314,29 @@ const listener = new Listener({
 });
 
 /** The sample shown for a word: its reference when that is a sample, otherwise its first sample. */
+/**
+ * The sample shown for a word: the chosen version's reference (or any sample
+ * of it) when the word has that version, otherwise its main version's.
+ */
 function sampleFor(word: Word): Clip | null {
   const own = templates.filter((t) => t.word.id === word.id);
-  return (own.find((t) => t.clip.id === word.referenceId) ?? own[0])?.clip ?? null;
+  const of = (variant: string) =>
+    own.find((t) => t.clip.id === referenceFor(word, variant)) ?? own.find((t) => variantOf(t.clip) === variant);
+  return (of(settings.speakVariant) ?? of(MAIN_VARIANT) ?? own.find((t) => t.clip.id === word.referenceId) ?? own[0])?.clip ?? null;
+}
+
+/** Fills the version choice with every version found in the vocabulary. */
+function renderSpeakVariants(): void {
+  const names = [...new Set(templates.map((t) => variantOf(t.clip)).filter((v) => v !== MAIN_VARIANT))].sort((a, b) =>
+    a.localeCompare(b, 'ja'),
+  );
+  if (settings.speakVariant && !names.includes(settings.speakVariant)) names.unshift(settings.speakVariant);
+  ui.speakVariant.replaceChildren(
+    el('option', { value: MAIN_VARIANT, textContent: '基本' }),
+    ...names.map((name) => el('option', { value: name, textContent: name })),
+  );
+  ui.speakVariant.value = settings.speakVariant;
+  ui.speakVariantBox.hidden = names.length === 0;
 }
 
 function speakSentence(text: string): void {
@@ -1265,7 +1424,8 @@ function renderCaption(): void {
 function candidatesText(rec: Recognition): string {
   const [top, ...rest] = rec.candidates;
   if (!top) return '';
-  const list = (cs: typeof rec.candidates) => cs.map((c) => `${c.word.label} ${Math.round(c.score)}点`).join('、');
+  const list = (cs: typeof rec.candidates) =>
+    cs.map((c) => `${withVariant(c.word.label, c.variant)} ${Math.round(c.score)}点`).join('、');
   if (!rec.word) return `いちばん近いのは${list([top])}でした（${ACCEPT_SCORE}点未満）`;
   return rest.length ? `${Math.round(top.score)}点　ほかの候補は${list(rest)}` : `${Math.round(top.score)}点`;
 }
@@ -1277,7 +1437,10 @@ function renderTranscript(): void {
       el(
         'li',
         { className: rec.word ? '' : 'is-unknown' },
-        el('span', { className: 'said', textContent: rec.word ? rec.word.label : '読み取れませんでした' }),
+        el('span', {
+          className: 'said',
+          textContent: rec.word ? withVariant(rec.word.label, rec.candidates[0].variant) : '読み取れませんでした',
+        }),
         el('span', { className: 'why', textContent: candidatesText(rec) }),
         el('span', { className: 'when', textContent: where }),
       ),
@@ -1612,6 +1775,12 @@ function bindEvents(): void {
     if (text) speakSentence(text);
   };
   ui.motionReplay.onclick = () => player.play();
+  ui.speakVariant.onchange = () => {
+    settings.speakVariant = ui.speakVariant.value;
+    saveSettings();
+    // Replay the current sentence in the chosen version.
+    if (spoken) speakSentence(spoken.text);
+  };
   ui.motionSlow.onchange = () => {
     player.speed = ui.motionSlow.checked ? 0.5 : 1;
   };

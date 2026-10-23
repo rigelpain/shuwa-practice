@@ -113,6 +113,14 @@ describe('recognize', () => {
     expect(recognize(clipOf(move(24, vertical)), templates, opts).word?.label).toBe('どうして');
   });
 
+  it('tells which version of a word matched', () => {
+    const regional = { ...templates[2], clip: { ...templates[2].clip, variant: '関西' } };
+    const res = recognize(clipOf(move(30, vertical)), [templates[0], regional], opts);
+    expect(res.word?.label).toBe('どうして');
+    expect(res.candidates[0].variant).toBe('関西');
+    expect(recognize(clipOf(move(30, arc)), templates, opts).candidates[0].variant).toBe('');
+  });
+
   it('shows nothing for a sign unlike any sample', () => {
     const res = recognize(clipOf(move(30, sweep, 0.25)), templates, opts);
     expect(res.word).toBeNull();

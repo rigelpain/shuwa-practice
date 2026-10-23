@@ -62,6 +62,11 @@ export interface Clip {
   wordId: string;
   /** Missing in clips recorded before kinds existed; see clipKind(). */
   kind?: ClipKind;
+  /**
+   * Which version of the sign this is, for words signed differently by region,
+   * family or community: '' is the word's main version. Missing in older clips.
+   */
+  variant?: string;
   /** Who signed it. Kept so training data can later be split by person. */
   signer: string;
   createdAt: number;
@@ -75,14 +80,42 @@ export interface Clip {
 export interface Word {
   id: string;
   label: string;
-  /** The clip practice attempts are compared against. */
+  /**
+   * The reference of the word's first version, kept for older code and files.
+   * Use referenceFor() to get the reference of a particular version.
+   */
   referenceId: string | null;
+  /** Reference clip of each version, keyed by version name. Missing in older words. */
+  references?: Record<string, string>;
   createdAt: number;
   /** Group in the word list; words added by hand have none. */
   category?: string;
 }
 
-/** Older clips have no kind: the word's reference counts as a sample, anything else as practice. */
+/** The main version of a word, shown as 基本. */
+export const MAIN_VARIANT = '';
+
+export const variantOf = (clip: Clip): string => clip.variant ?? MAIN_VARIANT;
+
+/** Each version's reference clip id, including what older words kept in referenceId. */
+export function referencesOf(word: Word): Record<string, string> {
+  return word.references ?? (word.referenceId ? { [MAIN_VARIANT]: word.referenceId } : {});
+}
+
+export function referenceFor(word: Word, variant: string): string | null {
+  return referencesOf(word)[variant] ?? null;
+}
+
+/** Sets (or with null, clears) a version's reference, keeping referenceId pointing at the first one. */
+export function setReference(word: Word, variant: string, clipId: string | null): void {
+  const refs = { ...referencesOf(word) };
+  if (clipId) refs[variant] = clipId;
+  else delete refs[variant];
+  word.references = refs;
+  word.referenceId = refs[MAIN_VARIANT] ?? Object.values(refs)[0] ?? null;
+}
+
+/** Older clips have no kind: a reference counts as a sample, anything else as practice. */
 export function clipKind(clip: Clip, word: Word | null): ClipKind {
-  return clip.kind ?? (clip.id === word?.referenceId ? 'sample' : 'practice');
+  return clip.kind ?? (word && Object.values(referencesOf(word)).includes(clip.id) ? 'sample' : 'practice');
 }

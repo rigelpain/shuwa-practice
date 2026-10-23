@@ -780,6 +780,59 @@ input[type='checkbox'] {
   color: var(--paper);
 }
 
+.variants {
+  display: grid;
+  gap: 6px;
+}
+
+.variant-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.variant {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 0.875rem;
+}
+
+.variant small {
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.variant[aria-pressed='true'] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.variant[aria-pressed='true'] small {
+  color: inherit;
+  opacity: 0.75;
+}
+
+.variant-form {
+  display: flex;
+  gap: 8px;
+}
+
+.variant-form input {
+  flex: 1;
+}
+
+.speak-variant {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .word-detail {
   display: flex;
   flex-direction: column;

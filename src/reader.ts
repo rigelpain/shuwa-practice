@@ -1,7 +1,7 @@
 import { POSE } from './features';
 import { trimToHands } from './recorder';
 import { compareClips, type CompareOptions } from './scoring';
-import type { Clip, Frame, FrameData, Word } from './types';
+import { variantOf, type Clip, type Frame, type FrameData, type Word } from './types';
 
 export interface SegmenterOptions {
   /** Wrist speed, in shoulder widths per second, that starts a sign. */
@@ -161,6 +161,8 @@ export interface Template {
 export interface Candidate {
   word: Word;
   score: number;
+  /** The version whose sample matched best ('' for the main version). */
+  variant: string;
 }
 
 export interface Recognition {
@@ -178,7 +180,7 @@ export function recognize(sign: Clip, templates: Template[], opts: CompareOption
   const best = new Map<string, Candidate>();
   for (const { word, clip } of templates) {
     const score = compareClips(clip, sign, opts).score;
-    if (score > (best.get(word.id)?.score ?? -Infinity)) best.set(word.id, { word, score });
+    if (score > (best.get(word.id)?.score ?? -Infinity)) best.set(word.id, { word, score, variant: variantOf(clip) });
   }
   const candidates = [...best.values()].sort((a, b) => b.score - a.score).slice(0, 3);
   const top = candidates[0];
